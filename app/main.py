@@ -2,14 +2,31 @@ import socket
 import threading
 
 def handle_client(connection):
-    """Handles communication with a single client."""
-    pong = "+PONG\r\n"
     with connection:
         while True:
             data = connection.recv(1024)
             if not data:
-                break  # Client closed connection
-            connection.sendall(pong.encode())
+                break  # client disconnected
+
+            try:
+                parts = data.decode().strip().split("\r\n")
+            except UnicodeDecodeError:
+                continue  # skip invalid input
+
+            # RESP array format: ["*2", "$4", "ECHO", "$5", "hello"]
+            if len(parts) >= 3:
+                command = parts[2].upper()
+
+                if command == "PING":
+                    connection.sendall(b"+PONG\r\n")
+
+                elif command == "ECHO" and len(parts) >= 5:
+                    message = parts[4]
+                    resp = f"${len(message)}\r\n{message}\r\n"
+                    connection.sendall(resp.encode())
+
+                else:
+                    connection.sendall(b"-ERR unknown command\r\n")
 
 def main():
     print("Logs from your program will appear here!")
@@ -21,7 +38,7 @@ def main():
         connection, _ = server_socket.accept()
         threading.Thread(
             target=handle_client,
-            args=(connection,),  # Pass connection to function
+            args=(connection,),
             daemon=True
         ).start()
 

@@ -1,3 +1,9 @@
+import socket
+import threading
+import time
+
+store = {}  # key -> (value, expiry_timestamp)
+
 def handle_client(connection):
     with connection:
         buffer = b""
@@ -5,10 +11,9 @@ def handle_client(connection):
             chunk = connection.recv(1024)
             if not chunk:
                 break  # client disconnected
-
             buffer += chunk
 
-            # Keep processing commands as long as we have enough data
+            # Only process if we have a full command
             while b"\r\n" in buffer:
                 try:
                     parts = buffer.decode().split("\r\n")
@@ -16,37 +21,42 @@ def handle_client(connection):
                     break  # wait for more data
 
                 if len(parts) < 3:
-                    break  # not enough for a command
+                    break  # incomplete
 
                 command = parts[2].upper()
 
+                # PING
                 if command == "PING":
                     connection.sendall(b"+PONG\r\n")
-                    buffer = b""  # no args in PING, safe to clear fully
+                    buffer = b""
+                    continue
 
-                elif command == "ECHO" and len(parts) >= 5:
+                # ECHO
+                if command == "ECHO" and len(parts) >= 5:
                     message = parts[4]
                     resp = f"${len(message)}\r\n{message}\r\n"
                     connection.sendall(resp.encode())
                     buffer = b""
+                    continue
 
-                elif command == "SET" and len(parts) >= 6:
+                # SET (with optional PX expiry)
+                if command == "SET" and len(parts) >= 6:
                     key = parts[4]
                     value = parts[6]
                     expiry_timestamp = None
-
                     if len(parts) >= 10 and parts[8].upper() == "PX":
                         try:
                             px_value = int(parts[10])
                             expiry_timestamp = time.time() + (px_value / 1000.0)
                         except ValueError:
                             pass
-
                     store[key] = (value, expiry_timestamp)
                     connection.sendall(b"+OK\r\n")
                     buffer = b""
+                    continue
 
-                elif command == "GET" and len(parts) >= 4:
+                # GET
+                if command == "GET" and len(parts) >= 4:
                     key = parts[4]
                     if key in store:
                         value, expiry = store[key]
@@ -59,8 +69,26 @@ def handle_client(connection):
                     else:
                         connection.sendall(b"$-1\r\n")
                     buffer = b""
+                    continue
 
-                else:
-                    # If we don't understand the command, flush buffer to avoid loop
-                    connection.sendall(b"-ERR unknown command\r\n")
-                    buffer = b""
+                # Unknown command
+                connection.sendall(b"-ERR unknown command\r\n")
+                buffer = b""
+                continue
+
+
+def main():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(("localhost", 6379))
+    server_socket.listen()
+
+    print("Server is running on localhost:6379")
+
+    while True:
+        conn, _ = server_socket.accept()
+        threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

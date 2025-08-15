@@ -6,33 +6,40 @@ store={}
 
 def handle_client(connection):
     with connection:
+        buffer=b""
         while True:
             data = connection.recv(1024)
             if not data:
                 break  # client disconnected
 
-            try:
-                parts = data.decode().strip().split("\r\n")
-            except UnicodeDecodeError:
-                continue  # skip invalid input
+            buffer += data    
 
-            # RESP array format: ["*2", "$4", "ECHO", "$5", "hello"]
-            if len(parts) >= 3:
+            while b"\r\n" in buffer:
+                try:
+                    parts = buffer.decode().strip().split("\r\n")
+                except UnicodeDecodeError:
+                    break  # skip invalid input
+
+                # RESP array format: ["*2", "$4", "ECHO", "$5", "hello"]
+                if len(parts) >= 3:
+                    break
+
                 command = parts[2].upper()
 
                 if command == "PING":
                     connection.sendall(b"+PONG\r\n")
+                    buffer=b""
 
                 elif command == "ECHO" and len(parts) >= 5:
                     message = parts[4]
                     resp = f"${len(message)}\r\n{message}\r\n"
                     connection.sendall(resp.encode())
+                    buffer=b""
 
                 elif command == "SET" and len(parts) >= 6:
                     key = parts[4]
                     value = parts[6]
-                    store[key] = value
-                    connection.sendall(b"+OK\r\n")
+                    expiry_timestamp = None
 
                     if len(parts) >= 10 and parts[8].upper() == "PX":
                         try:
@@ -43,7 +50,7 @@ def handle_client(connection):
 
                     store[key] = (value, expiry_timestamp)
                     connection.sendall(b"+OK\r\n")
-
+                    buffer=b""
                 
                 elif command == "GET" and len(parts) >= 4:
                     key = parts[4]
@@ -57,11 +64,13 @@ def handle_client(connection):
                             resp = f"${len(value)}\r\n{value}\r\n"
                             connection.sendall(resp.encode())
                     else:
-                        connection.sendall(b"$-1\r\n")  # null bulk string
+                        connection.sendall(b"$-1\r\n")
+                    buffer=b""  # null bulk string
 
                 else:
                     connection.sendall(b"-ERR unknown command\r\n")
-
+                buffer-b""
+                
 def main():
     print("Logs from your program will appear here!")
 

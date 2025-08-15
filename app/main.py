@@ -1,17 +1,9 @@
-import socket 
-import threading # noqa: F401
-
+import socket
+import threading
 
 def handle_client(connection):
-    # You can use print statements as follows for debugging, they'll be visible when running tests.
-    print("Logs from your program will appear here!")
-    # Uncomment this to pass the first stage
-    pong= "+PONG\r\n"
-    # Uncomment this to pass the first stage
-    #
-    server_socket = socket.create_server(("localhost", 6379))
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    connection, _ = server_socket.accept()
+    """Handles communication with a single client."""
+    pong = "+PONG\r\n"
     with connection:
         while True:
             data = connection.recv(1024)
@@ -27,9 +19,11 @@ def main():
 
     while True:
         connection, _ = server_socket.accept()
-        # Start a new thread for each client
-        threading.Thread(target=handle_client, args=(connection,), daemon=True).start()
-
+        threading.Thread(
+            target=handle_client,
+            args=(connection,),  # Pass connection to function
+            daemon=True
+        ).start()
 
 if __name__ == "__main__":
     main()

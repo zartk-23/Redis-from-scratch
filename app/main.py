@@ -1,6 +1,8 @@
 import socket
 import threading
 
+store={}
+
 def handle_client(connection):
     with connection:
         while True:
@@ -24,6 +26,21 @@ def handle_client(connection):
                     message = parts[4]
                     resp = f"${len(message)}\r\n{message}\r\n"
                     connection.sendall(resp.encode())
+
+                elif command == "SET" and len(parts) >= 6:
+                    key = parts[4]
+                    value = parts[6]
+                    store[key] = value
+                    connection.sendall(b"+OK\r\n")
+
+                elif command == "GET" and len(parts) >= 4:
+                    key = parts[4]
+                    if key in store:
+                        value = store[key]
+                        resp = f"${len(value)}\r\n{value}\r\n"
+                        connection.sendall(resp.encode())
+                    else:
+                        connection.sendall(b"$-1\r\n")  # null bulk string
 
                 else:
                     connection.sendall(b"-ERR unknown command\r\n")

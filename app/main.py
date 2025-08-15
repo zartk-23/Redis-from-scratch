@@ -9,6 +9,7 @@ def main():
     # Uncomment this to pass the first stage
     #
     server_socket = socket.create_server(("localhost", 6379), reuse_addr=True)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     while True:
         connection, _ = server_socket.accept()
         with connection:

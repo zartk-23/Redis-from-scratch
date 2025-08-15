@@ -1,5 +1,6 @@
 import socket
 import threading
+import time
 
 store={}
 
@@ -33,12 +34,28 @@ def handle_client(connection):
                     store[key] = value
                     connection.sendall(b"+OK\r\n")
 
+                    if len(parts) >= 10 and parts[8].upper() == "PX":
+                        try:
+                            px_value = int(parts[10])
+                            expiry_timestamp = time.time() + (px_value / 1000.0)
+                        except ValueError:
+                            pass  # ignore invalid PX value
+
+                    store[key] = (value, expiry_timestamp)
+                    connection.sendall(b"+OK\r\n")
+
+                
                 elif command == "GET" and len(parts) >= 4:
                     key = parts[4]
                     if key in store:
-                        value = store[key]
-                        resp = f"${len(value)}\r\n{value}\r\n"
-                        connection.sendall(resp.encode())
+                        value, expiry = store[key]
+                        if expiry is not None and time.time() > expiry:
+                            # Key expired → remove and return null bulk string
+                            del store[key]
+                            connection.sendall(b"$-1\r\n")
+                        else:
+                            resp = f"${len(value)}\r\n{value}\r\n"
+                            connection.sendall(resp.encode())
                     else:
                         connection.sendall(b"$-1\r\n")  # null bulk string
 

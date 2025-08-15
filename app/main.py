@@ -10,12 +10,13 @@ def main():
     #
     server_socket = socket.create_server(("localhost", 6379))
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    while True:
-        connection, _ = server_socket.accept()
-        with connection:
+    connection, _ = server_socket.accept()
+    with connection:
+        while True:
             data = connection.recv(1024)
-            if data:
-                connection.sendall(pong.encode())
+            if not data:
+                break  # Client closed connection
+            connection.sendall(pong.encode())
 
 
 if __name__ == "__main__":

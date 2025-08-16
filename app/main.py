@@ -1,117 +1,79 @@
 import socket
-import threading
-import time
 
-store = {}  # key -> (value, expiry_timestamp) OR list of values
+# In-memory key-value store
+store = {}
 
-def handle_client(connection):
-    with connection:
-        buffer = b""
+def encode_simple_string(s: str) -> bytes:
+    return f"+{s}\r\n".encode()
+
+def encode_bulk_string(s: str) -> bytes:
+    return f"${len(s)}\r\n{s}\r\n".encode()
+
+def encode_integer(i: int) -> bytes:
+    return f":{i}\r\n".encode()
+
+def handle_command(parts):
+    command = parts[0].upper()
+
+    if command == "PING":
+        return encode_simple_string("PONG")
+
+    elif command == "ECHO" and len(parts) > 1:
+        return encode_bulk_string(parts[1])
+
+    elif command == "SET" and len(parts) > 2:
+        key, value = parts[1], parts[2]
+        store[key] = value
+        return encode_simple_string("OK")
+
+    elif command == "GET" and len(parts) > 1:
+        key = parts[1]
+        if key in store:
+            value = store[key]
+            # If it's a list, Redis GET returns an error, but for now keep it simple
+            if isinstance(value, list):
+                return encode_bulk_string("")  
+            return encode_bulk_string(value)
+        else:
+            return b"$-1\r\n"
+
+    elif command == "RPUSH" and len(parts) > 2:
+        key, value = parts[1], parts[2]
+        if key not in store:
+            store[key] = []   # create new list
+        if not isinstance(store[key], list):
+            # Redis would return an error if key is not a list
+            return encode_simple_string("ERR: wrong type")
+        store[key].append(value)
+        return encode_integer(len(store[key]))
+
+    else:
+        return encode_simple_string("ERR: unknown command")
+
+def parse_message(message: str):
+    lines = message.split("\r\n")
+    parts = [line for line in lines if line and not line.startswith("*") and not line.startswith("$")]
+    return parts
+
+def start_server():
+    host = "localhost"
+    port = 6379
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((host, port))
+        server_socket.listen(1)
+        print(f"Redis clone running on {host}:{port}")
+
         while True:
-            chunk = connection.recv(1024)
-            if not chunk:
-                break  # client disconnected
-            buffer += chunk
-
-            # Only process if we have a full command
-            while b"\r\n" in buffer:
-                try:
-                    parts = buffer.decode().split("\r\n")
-                except UnicodeDecodeError:
-                    break  # wait for more data
-
-                if len(parts) < 3:
-                    break  # incomplete
-
-                command = parts[2].upper()
-
-                # PING
-                if command == "PING":
-                    connection.sendall(b"+PONG\r\n")
-                    buffer = b""
+            client_socket, _ = server_socket.accept()
+            with client_socket:
+                data = client_socket.recv(1024).decode()
+                if not data:
                     continue
-
-                # ECHO
-                if command == "ECHO" and len(parts) >= 5:
-                    message = parts[4]
-                    resp = f"${len(message)}\r\n{message}\r\n"
-                    connection.sendall(resp.encode())
-                    buffer = b""
-                    continue
-
-                # SET (with optional PX expiry)
-                if command == "SET" and len(parts) >= 6:
-                    key = parts[4]
-                    value = parts[6]
-                    expiry_timestamp = None
-                    if len(parts) >= 10 and parts[8].upper() == "PX":
-                        try:
-                            px_value = int(parts[10])
-                            expiry_timestamp = time.time() + (px_value / 1000.0)
-                        except ValueError:
-                            pass
-                    store[key] = (value, expiry_timestamp)
-                    connection.sendall(b"+OK\r\n")
-                    buffer = b""
-                    continue
-
-                # GET
-                if command == "GET" and len(parts) >= 4:
-                    key = parts[4]
-                    if key in store:
-                        value = store[key]
-                        if isinstance(value, tuple):
-                            value, expiry = value
-                            if expiry and time.time() > expiry:
-                                del store[key]
-                                connection.sendall(b"$-1\r\n")
-                                buffer = b""
-                                continue
-                        if isinstance(value, str):
-                            resp = f"${len(value)}\r\n{value}\r\n"
-                            connection.sendall(resp.encode())
-                        else:  # trying GET on a list
-                            connection.sendall(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
-                    else:
-                        connection.sendall(b"$-1\r\n")
-                    buffer = b""
-                    continue
-
-                # RPUSH (create list with single element if not exists)
-                if command == "RPUSH" and len(parts) >= 6:
-                    key = parts[4]
-                    value = parts[6]
-
-                    if key not in store:
-                        store[key] = []  # create new list
-
-                    if isinstance(store[key], list):
-                        store[key].append(value)
-                        connection.sendall(f":{len(store[key])}\r\n".encode())
-                    else:
-                        connection.sendall(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
-
-                    buffer = b""
-                    continue
-
-                # Unknown command
-                connection.sendall(b"-ERR unknown command\r\n")
-                buffer = b""
-                continue
-
-
-def main():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("localhost", 6379))
-    server_socket.listen()
-
-    print("Server is running on localhost:6379")
-
-    while True:
-        conn, _ = server_socket.accept()
-        threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
-
+                parts = parse_message(data)
+                response = handle_command(parts)
+                client_socket.sendall(response)
 
 if __name__ == "__main__":
-    main()
+    start_server()

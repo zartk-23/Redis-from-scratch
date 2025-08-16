@@ -1,76 +1,90 @@
 import socket
 
-store = {}  # key-value store, can hold strings or lists
+# In-memory key-value store
+store = {}
 
 def encode_simple_string(s: str) -> bytes:
     return f"+{s}\r\n".encode()
 
+def encode_bulk_string(s: str) -> bytes:
+    if s is None:
+        return b"$-1\r\n"
+    return f"${len(s)}\r\n{s}\r\n".encode()
+
 def encode_integer(i: int) -> bytes:
     return f":{i}\r\n".encode()
 
-def handle_command(parts):
-    command = parts[0].upper()
+def decode_request(data: bytes):
+    """
+    Decodes RESP arrays like:
+    *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
+    """
+    parts = data.split(b"\r\n")
+    arr_len = int(parts[0][1:])  # *N
+    items = []
+    idx = 1
+    for _ in range(arr_len):
+        length = int(parts[idx][1:])  # $len
+        idx += 1
+        items.append(parts[idx].decode())  # actual string
+        idx += 1
+    return items
 
-    if command == "PING":
+def handle_command(command: list[str]) -> bytes:
+    cmd = command[0].upper()
+
+    if cmd == "PING":
         return encode_simple_string("PONG")
 
-    elif command == "ECHO":
-        return encode_simple_string(parts[1])
+    elif cmd == "ECHO":
+        return encode_bulk_string(command[1])
 
-    elif command == "SET":
-        store[parts[1]] = parts[2]
+    elif cmd == "SET":
+        key, value = command[1], command[2]
+        store[key] = value
         return encode_simple_string("OK")
 
-    elif command == "GET":
-        value = store.get(parts[1])
-        if value is None:
-            return b"$-1\r\n"   # RESP nil
-        return f"${len(value)}\r\n{value}\r\n".encode()
+    elif cmd == "GET":
+        key = command[1]
+        return encode_bulk_string(store.get(key))
 
-    elif command == "RPUSH":
-        key, value = parts[1], parts[2]
-
+    elif cmd == "RPUSH":
+        key = command[1]
+        values = command[2:]  # could be multiple
         if key not in store:
-            store[key] = []  # create a new list
+            store[key] = []
+        if not isinstance(store[key], list):
+            return encode_simple_string("ERR Wrong type")  # Redis-like error
+        store[key].extend(values)
+        return encode_integer(len(store[key]))
 
-        store[key].append(value)  # append element
-        return encode_integer(len(store[key]))  # length of list
-
-    return encode_simple_string("ERR unknown command")
-
-def parse_resp(data: bytes):
-    # Very naive RESP array parser: only handles arrays of bulk strings
-    if not data.startswith(b"*"):
-        return []
-
-    lines = data.split(b"\r\n")
-    parts = []
-    for i in range(2, len(lines), 2):  # skip "*<n>" and "$<len>"
-        if lines[i] == b"":
-            continue
-        parts.append(lines[i].decode())
-    return parts
+    else:
+        return encode_simple_string("ERR unknown command")
 
 def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("0.0.0.0", 6379))
-    server.listen(1)
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(("localhost", 6379))
+    server_socket.listen(1)
+
+    print("Server running on port 6379")
 
     while True:
-        client, _ = server.accept()
-        data = client.recv(1024)
+        client_socket, _ = server_socket.accept()
+        data = client_socket.recv(1024)
+
         if not data:
-            client.close()
+            client_socket.close()
             continue
 
-        parts = parse_resp(data)
-        if not parts:
-            client.close()
-            continue
+        try:
+            command = decode_request(data)
+            response = handle_command(command)
+        except Exception as e:
+            response = encode_simple_string(f"ERR {str(e)}")
 
-        response = handle_command(parts)
-        client.sendall(response)
-        client.close()
+        client_socket.sendall(response)
+        client_socket.close()
 
 if __name__ == "__main__":
     main()

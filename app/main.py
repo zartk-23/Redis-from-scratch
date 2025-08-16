@@ -40,7 +40,7 @@ def parse_resp(buffer):
                 return None, buffer
 
         # Return parsed parts and remaining buffer
-        remaining = b"\r\n".join(lines[idx:].encode())
+        remaining = "\r\n".join(lines[idx:]).encode()
         return parts, remaining
 
     # Fallback for simple commands

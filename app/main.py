@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-store = {}  # key -> (value, expiry_timestamp)
+store = {}  # key -> (value, expiry_timestamp) OR list of values
 
 def handle_client(connection):
     with connection:
@@ -59,15 +59,38 @@ def handle_client(connection):
                 if command == "GET" and len(parts) >= 4:
                     key = parts[4]
                     if key in store:
-                        value, expiry = store[key]
-                        if expiry and time.time() > expiry:
-                            del store[key]
-                            connection.sendall(b"$-1\r\n")
-                        else:
+                        value = store[key]
+                        if isinstance(value, tuple):
+                            value, expiry = value
+                            if expiry and time.time() > expiry:
+                                del store[key]
+                                connection.sendall(b"$-1\r\n")
+                                buffer = b""
+                                continue
+                        if isinstance(value, str):
                             resp = f"${len(value)}\r\n{value}\r\n"
                             connection.sendall(resp.encode())
+                        else:  # trying GET on a list
+                            connection.sendall(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
                     else:
                         connection.sendall(b"$-1\r\n")
+                    buffer = b""
+                    continue
+
+                # RPUSH (create list with single element if not exists)
+                if command == "RPUSH" and len(parts) >= 6:
+                    key = parts[4]
+                    value = parts[6]
+
+                    if key not in store:
+                        store[key] = []  # create new list
+
+                    if isinstance(store[key], list):
+                        store[key].append(value)
+                        connection.sendall(f":{len(store[key])}\r\n".encode())
+                    else:
+                        connection.sendall(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
                     buffer = b""
                     continue
 

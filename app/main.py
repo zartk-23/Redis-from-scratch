@@ -4,6 +4,48 @@ import time
 
 store = {}  # key -> (value, expiry_timestamp or list)
 
+def parse_resp(buffer):
+    """Parse a RESP message from the buffer, return (command_parts, remaining_buffer)."""
+    if not buffer:
+        return None, buffer
+
+    try:
+        decoded = buffer.decode()
+    except UnicodeDecodeError:
+        return None, buffer
+
+    lines = decoded.split("\r\n")
+    if not lines or lines[0] == "":
+        return None, buffer
+
+    # Handle RESP array
+    if lines[0].startswith("*"):
+        try:
+            num_args = int(lines[0][1:])
+        except ValueError:
+            return None, buffer
+
+        parts = []
+        idx = 1  # Start after *n
+        for _ in range(num_args):
+            if idx >= len(lines) or not lines[idx].startswith("$"):
+                return None, buffer  # Incomplete bulk string
+            try:
+                str_len = int(lines[idx][1:])
+                if idx + 1 >= len(lines) or len(lines[idx + 1]) != str_len:
+                    return None, buffer  # Incomplete or wrong length
+                parts.append(lines[idx + 1])
+                idx += 2
+            except ValueError:
+                return None, buffer
+
+        # Return parsed parts and remaining buffer
+        remaining = b"\r\n".join(lines[idx:].encode())
+        return parts, remaining
+
+    # Fallback for simple commands
+    parts = [p for p in decoded.split("\r\n") if p]
+    return parts, b""
 
 def handle_client(connection):
     with connection:
@@ -14,13 +56,9 @@ def handle_client(connection):
                 break  # client disconnected
             buffer += chunk
 
-            while b"\r\n" in buffer:
-                try:
-                    parts = [p for p in buffer.decode().split("\r\n") if p]  # remove empty strings
-                except UnicodeDecodeError:
-                    break
-
-                if len(parts) < 2:
+            while buffer:
+                parts, buffer = parse_resp(buffer)
+                if not parts:
                     break  # incomplete command
 
                 command = parts[0].upper() if parts else None
@@ -28,7 +66,6 @@ def handle_client(connection):
                 # PING
                 if command == "PING":
                     connection.sendall(b"+PONG\r\n")
-                    buffer = b""
                     continue
 
                 # ECHO
@@ -36,7 +73,6 @@ def handle_client(connection):
                     message = parts[1]
                     resp = f"${len(message)}\r\n{message}\r\n"
                     connection.sendall(resp.encode())
-                    buffer = b""
                     continue
 
                 # SET (with optional PX expiry)
@@ -52,7 +88,6 @@ def handle_client(connection):
                             pass
                     store[key] = (value, expiry_timestamp)
                     connection.sendall(b"+OK\r\n")
-                    buffer = b""
                     continue
 
                 # GET
@@ -68,26 +103,22 @@ def handle_client(connection):
                             connection.sendall(resp.encode())
                     else:
                         connection.sendall(b"$-1\r\n")
-                    buffer = b""
                     continue
 
                 # RPUSH
                 if command == "RPUSH" and len(parts) >= 3:
                     key = parts[1]
-                    value = parts[2]
+                    values = parts[2:]  # Support multiple values
                     if key not in store or not isinstance(store[key], list):
                         store[key] = []
-                    store[key].append(value)
+                    store[key].extend(values)
                     resp = f":{len(store[key])}\r\n"
                     connection.sendall(resp.encode())
-                    buffer = b""
                     continue
 
                 # Unknown command
                 connection.sendall(b"-ERR unknown command\r\n")
-                buffer = b""
                 continue
-
 
 def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -100,7 +131,6 @@ def main():
     while True:
         conn, _ = server_socket.accept()
         threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
-
 
 if __name__ == "__main__":
     main()

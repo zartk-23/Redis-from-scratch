@@ -3,8 +3,6 @@ import threading
 import time
 
 store = {}  # key -> (value, expiry_timestamp or list)
-lock = threading.Lock()
-blocking_clients = {}  # key -> [ (conn, condition) ]
 
 
 def parse_resp(buffer):
@@ -24,110 +22,85 @@ def parse_resp(buffer):
     if len(lines) < 3:
         return None, buffer
 
+    try:
+        n = int(lines[0][1:])
+    except ValueError:
+        return None, buffer
+
     parts = []
     idx = 1
-    while idx < len(lines) - 1:
-        if lines[idx].startswith("$"):
-            length = int(lines[idx][1:])
-            if idx + 1 >= len(lines) - 1:
-                return None, buffer
-            parts.append(lines[idx + 1])
-            idx += 2
-        else:
-            idx += 1
+    for _ in range(n):
+        if not lines[idx].startswith("$"):
+            return None, buffer
+        length = int(lines[idx][1:])
+        part = lines[idx + 1]
+        parts.append(part)
+        idx += 2
 
-    # calculate consumed bytes
+    # compute bytes consumed
     consumed = 0
     for p in parts:
-        consumed += len(p) + len(str(len(p))) + 4
-    consumed += len(str(len(parts))) + 3
+        consumed += len(p) + len(str(len(p))) + 5  # $len\r\np\r\n
+    consumed += len(str(n)) + 3  # *n\r\n
 
     return parts, buffer[consumed:]
 
 
-def send_resp(conn, data):
-    """Send data in RESP format."""
-    if isinstance(data, str):
-        conn.sendall(f"+{data}\r\n".encode())
-    elif isinstance(data, int):
-        conn.sendall(f":{data}\r\n".encode())
-    elif data is None:
-        conn.sendall(b"$-1\r\n")
-    elif isinstance(data, list):
-        conn.sendall(f"*{len(data)}\r\n".encode())
-        for item in data:
-            conn.sendall(f"${len(item)}\r\n{item}\r\n".encode())
-
-
-def handle_client(conn, addr):
+def handle_client(client):
     buffer = b""
     while True:
         try:
-            data = conn.recv(4096)
+            data = client.recv(4096)
             if not data:
                 break
             buffer += data
 
             while True:
-                result = parse_resp(buffer)
-                if not result:
-                    break
-                parts, buffer = result
+                parts, buffer = parse_resp(buffer)
                 if not parts:
-                    continue
+                    break
 
-                command = parts[0].upper()
+                cmd = parts[0].upper()
 
-                if command == "PING":
-                    send_resp(conn, "PONG")
-
-                elif command == "ECHO":
-                    send_resp(conn, parts[1])
-
-                elif command == "SET":
+                # ---------------- SET ----------------
+                if cmd == "SET":
                     key, value = parts[1], parts[2]
-                    with lock:
-                        store[key] = value
-                    send_resp(conn, "OK")
+                    expiry = None
+                    if len(parts) > 4 and parts[3].upper() == "PX":
+                        expiry = time.time() + int(parts[4]) / 1000.0
+                    store[key] = (value, expiry)
+                    client.sendall(b"+OK\r\n")
 
-                elif command == "GET":
+                # ---------------- GET ----------------
+                elif cmd == "GET":
                     key = parts[1]
-                    with lock:
-                        val = store.get(key, None)
-                    if isinstance(val, list):
-                        send_resp(conn, None)
+                    if key not in store:
+                        client.sendall(b"$-1\r\n")
                     else:
-                        send_resp(conn, val)
-
-                elif command == "RPUSH":
-                    key, *values = parts[1:]
-                    with lock:
-                        if key not in store or not isinstance(store[key], list):
-                            store[key] = []
-                        store[key].extend(values)
-                        length = len(store[key])
-
-                        # wake up blocked clients
-                        if key in blocking_clients:
-                            for client_conn, cond in blocking_clients[key]:
-                                with cond:
-                                    cond.notify()
-                            del blocking_clients[key]
-
-                    send_resp(conn, length)
-
-                elif command == "LPOP":
-                    key = parts[1]
-                    with lock:
-                        if key not in store or not isinstance(store[key], list) or not store[key]:
-                            send_resp(conn, None)
+                        val, expiry = store[key]
+                        if expiry and time.time() > expiry:
+                            del store[key]
+                            client.sendall(b"$-1\r\n")
                         else:
-                            val = store[key].pop(0)
-                            send_resp(conn, val)
+                            resp = f"${len(val)}\r\n{val}\r\n"
+                            client.sendall(resp.encode())
 
+                # ---------------- RPUSH ----------------
+                elif cmd == "RPUSH":
+                    key = parts[1]
+                    values = parts[2:]
+                    if key not in store or not isinstance(store[key], list):
+                        store[key] = []
+                    store[key].extend(values)
+                    resp = f":{len(store[key])}\r\n"
+                    client.sendall(resp.encode())
+
+                # ---------------- BLPOP ----------------
                 elif cmd == "BLPOP":
                     if len(parts) < 3:
-                        client.sendall(b"-ERR wrong number of arguments for 'blpop' command\r\n")
+                        client.sendall(
+                            b"-ERR wrong number of arguments for 'blpop' command\r\n"
+                        )
                         continue
 
                     keys = parts[1:-1]
@@ -141,7 +114,7 @@ def handle_client(conn, addr):
                     start_time = time.time()
 
                     while True:
-                        # check all keys
+                        # try popping from any key
                         for k in keys:
                             if k in store and isinstance(store[k], list) and store[k]:
                                 popped = (k, store[k].pop(0))
@@ -149,49 +122,41 @@ def handle_client(conn, addr):
 
                         if popped:
                             key, val = popped
-                            response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
+                            response = (
+                                f"*2\r\n${len(key)}\r\n{key}\r\n"
+                                f"${len(val)}\r\n{val}\r\n"
+                            )
                             client.sendall(response.encode())
                             break
 
-                        # timeout check
+                        # timeout expired → send NULL BULK STRING
                         if timeout != 0 and (time.time() - start_time) >= timeout:
-                            client.sendall(b"$-1\r\n")  # Null bulk string on timeout
+                            client.sendall(b"$-1\r\n")
                             break
 
-                        time.sleep(0.05)  # short sleep to avoid busy loop
+                        time.sleep(0.05)  # avoid busy loop
 
-
-                        # register client for blocking
-                        for key in keys:
-                            cond = threading.Condition()
-                            with cond:
-                                blocking_clients.setdefault(key, []).append((conn, cond))
-                                cond.wait(timeout=0.1)
-                            # retry loop
-
+                # ---------------- UNKNOWN ----------------
                 else:
-                    send_resp(conn, f"ERR unknown command '{command}'")
+                    client.sendall(b"-ERR unknown command\r\n")
 
         except Exception as e:
-            try:
-                send_resp(conn, f"ERR {str(e)}")
-            except:
-                pass
+            print("Error:", e)
             break
 
-    conn.close()
+    client.close()
 
 
 def main():
-    host = "0.0.0.0"
-    port = 6379
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((host, port))
-    s.listen()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("localhost", 6379))
+    server.listen(5)
+    print("Server listening on port 6379")
+
     while True:
-        conn, addr = s.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        client, _ = server.accept()
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
 
 
 if __name__ == "__main__":

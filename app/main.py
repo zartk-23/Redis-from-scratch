@@ -112,8 +112,8 @@ def handle_command(conn, command_parts):
         values = command_parts[2:]
         if key not in store or not isinstance(store[key], list):
             store[key] = []
-        # Insert at the beginning (reverse order to maintain correct sequence)
-        for value in reversed(values):
+        # Insert values one by one at the beginning
+        for value in values:
             store[key].insert(0, value)
         conn.sendall(encode_resp(len(store[key])))
 

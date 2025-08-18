@@ -141,6 +141,17 @@ def handle_client(connection):
                         connection.sendall(b":0\r\n")
                     continue
 
+                # LPOP
+                if command == "LPOP" and len(parts) == 2:
+                    key = parts[1]
+                    if key in store and isinstance(store[key], list) and len(store[key]) > 0:
+                        value = store[key].pop(0)  # remove first element
+                        resp = f"${len(value)}\r\n{value}\r\n"
+                        connection.sendall(resp.encode())
+                    else:
+                        connection.sendall(b"$-1\r\n")  # null bulk string
+                    continue
+
                 # LRANGE (with negative index support)
                 if command == "LRANGE" and len(parts) == 4:
                     key = parts[1]

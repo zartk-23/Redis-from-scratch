@@ -122,6 +122,9 @@ def handle_client(conn, addr):
                     else:
                         conn.sendall(encode_resp(None))
                 elif command == "BLPOP":
+                    if len(parts) < 3:
+                        conn.sendall(b"-ERR wrong number of arguments for 'blpop' command\r\n")
+                        continue
                     keys = parts[1:-1]
                     try:
                         timeout = float(parts[-1])
@@ -147,15 +150,18 @@ def handle_client(conn, addr):
                             try:
                                 with client_cond:
                                     remaining_time = end_time - time.time() if end_time else None
-                                    while remaining_time is None or remaining_time > 0:
-                                        for key in keys:
-                                            if key in store and isinstance(store[key][0], list) and store[key][0]:
-                                                val = store[key][0].pop(0)
-                                                conn.sendall(encode_resp([key, val]))
-                                                return
+                                    if remaining_time is None or remaining_time > 0:
                                         client_cond.wait(timeout=remaining_time)
-                                        remaining_time = end_time - time.time() if end_time else None
-                                    conn.sendall(encode_resp(None))
+                                    for key in keys:
+                                        if key in store and isinstance(store[key][0], list) and store[key][0]:
+                                            val = store[key][0].pop(0)
+                                            conn.sendall(encode_resp([key, val]))
+                                            break
+                                    else:
+                                        conn.sendall(encode_resp(None))
+                            except Exception as e:
+                                print(f"BLPOP error for {addr}: {e}")
+                                conn.sendall(encode_resp(None))
                             finally:
                                 for k in keys:
                                     if k in blpop_waiting:
@@ -194,7 +200,10 @@ def handle_client(conn, addr):
             blpop_waiting[key] = [(c, cond, t) for c, cond, t in blpop_waiting[key] if c != conn]
             if not blpop_waiting[key]:
                 del blpop_waiting[key]
-    conn.close()
+    try:
+        conn.close()
+    except:
+        pass
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -203,8 +212,11 @@ def start_server():
     server.listen(5)
     print("Server running on port 6379")
     while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        try:
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        except Exception as e:
+            print(f"Server error: {e}")
 
 if __name__ == "__main__":
     start_server()

@@ -3,172 +3,140 @@ import threading
 import time
 
 store = {}  # key -> (value, expiry_timestamp or list)
+expiry = {}  # key -> expiry timestamp
+blocking_clients = {}  # key -> [(conn, timeout_end_time)]
 
-# RESP encoding helpers
-def encode_simple_string(s):
-    return f"+{s}\r\n".encode()
 
-def encode_error(msg):
-    return f"-{msg}\r\n".encode()
-
-def encode_integer(i):
-    return f":{i}\r\n".encode()
-
-def encode_bulk_string(s):
-    if s is None:
-        return b"$-1\r\n"
-    return f"${len(s)}\r\n{s}\r\n".encode()
-
-def encode_array(arr):
-    if arr is None:
-        return b"*-1\r\n"
-    out = f"*{len(arr)}\r\n".encode()
-    for a in arr:
-        if isinstance(a, bytes):
-            out += encode_bulk_string(a.decode())
-        else:
-            out += encode_bulk_string(str(a))
-    return out
-
-# RESP parser
 def parse_resp(buffer):
+    """Parse RESP messages."""
     if not buffer:
         return None, buffer
-    
-    prefix = buffer[:1]
-    if prefix == b'*':  # Array
-        try:
-            end = buffer.index(b'\r\n')
-        except ValueError:
-            return None, buffer
-        length = int(buffer[1:end])
-        items = []
-        rest = buffer[end+2:]
-        for _ in range(length):
-            if rest[:1] != b'$':
-                return None, buffer
-            lend = rest.index(b'\r\n')
-            strlen = int(rest[1:lend])
-            start = lend+2
-            bulk = rest[start:start+strlen]
-            items.append(bulk.decode())
-            rest = rest[start+strlen+2:]
-        return items, rest
-    return None, buffer
 
-waiting_clients = {}  # key -> list of (conn, timeout_timestamp)
-lock = threading.Lock()
+    if buffer.startswith(b"*"):
+        lines = buffer.split(b"\r\n")
+        n = int(lines[0][1:])
+        parts = []
+        idx = 1
+        for _ in range(n):
+            if lines[idx].startswith(b"$"):
+                length = int(lines[idx][1:])
+                parts.append(lines[idx + 1].decode())
+                idx += 2
+        return parts, b"\r\n".join(lines[idx:])
+    else:
+        parts = buffer.decode().strip().split()
+        return parts, b""
 
-def handle_command(conn, parts):
-    cmd = parts[0].upper()
+
+def encode_resp(data):
+    """Encode Python object to RESP format."""
+    if data is None:
+        return b"$-1\r\n"
+    if isinstance(data, str):
+        return f"${len(data)}\r\n{data}\r\n".encode()
+    if isinstance(data, int):
+        return f":{data}\r\n".encode()
+    if isinstance(data, list):
+        out = f"*{len(data)}\r\n"
+        for item in data:
+            if item is None:
+                out += "$-1\r\n"
+            else:
+                out += f"${len(str(item))}\r\n{item}\r\n"
+        return out.encode()
+    return b"+OK\r\n"
+
+
+def handle_command(conn, command_parts):
+    if not command_parts:
+        return
+
+    cmd = command_parts[0].upper()
 
     # PING
-    if cmd == 'PING':
-        if len(parts) == 2:
-            return encode_bulk_string(parts[1])
-        return encode_simple_string("PONG")
+    if cmd == "PING":
+        conn.sendall(b"+PONG\r\n")
 
     # ECHO
-    elif cmd == 'ECHO':
-        if len(parts) != 2:
-            return encode_error("ERR wrong number of arguments for 'echo' command")
-        return encode_bulk_string(parts[1])
+    elif cmd == "ECHO" and len(command_parts) > 1:
+        conn.sendall(encode_resp(command_parts[1]))
 
     # SET
-    elif cmd == 'SET':
-        if len(parts) < 3:
-            return encode_error("ERR wrong number of arguments for 'set' command")
-        key, value = parts[1], parts[2]
-        expiry = None
-        if len(parts) > 3 and parts[3].upper() == 'PX':
-            expiry = time.time() + int(parts[4]) / 1000
-        store[key] = (value, expiry)
-        return encode_simple_string("OK")
+    elif cmd == "SET":
+        key, value = command_parts[1], command_parts[2]
+        store[key] = value
+        if len(command_parts) > 3 and command_parts[3].upper() == "PX":
+            expiry[key] = time.time() + int(command_parts[4]) / 1000.0
+        conn.sendall(b"+OK\r\n")
 
     # GET
-    elif cmd == 'GET':
-        if len(parts) != 2:
-            return encode_error("ERR wrong number of arguments for 'get' command")
-        key = parts[1]
-        if key not in store:
-            return encode_bulk_string(None)
-        value, expiry = store[key]
-        if expiry and expiry < time.time():
+    elif cmd == "GET":
+        key = command_parts[1]
+        if key in expiry and time.time() > expiry[key]:
             del store[key]
-            return encode_bulk_string(None)
-        if isinstance(value, list):
-            return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
-        return encode_bulk_string(value)
+            del expiry[key]
+            conn.sendall(b"$-1\r\n")
+        elif key in store and isinstance(store[key], str):
+            conn.sendall(encode_resp(store[key]))
+        else:
+            conn.sendall(b"$-1\r\n")
 
     # RPUSH
-    elif cmd == 'RPUSH':
-        if len(parts) < 3:
-            return encode_error("ERR wrong number of arguments for 'rpush' command")
-        key = parts[1]
-        values = parts[2:]
-        if key not in store:
-            store[key] = ([], None)
-        val, expiry = store[key]
-        if not isinstance(val, list):
-            return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
-        val.extend(values)
-        store[key] = (val, expiry)
-        return encode_integer(len(val))
+    elif cmd == "RPUSH":
+        key = command_parts[1]
+        values = command_parts[2:]
+        if key not in store or not isinstance(store[key], list):
+            store[key] = []
+        store[key].extend(values)
+        conn.sendall(encode_resp(len(store[key])))
 
     # LPOP
-    elif cmd == 'LPOP':
-        if len(parts) < 2:
-            return encode_error("ERR wrong number of arguments for 'lpop' command")
-        key = parts[1]
-        count = 1
-        if len(parts) == 3:
-            count = int(parts[2])
-        if key not in store:
-            return encode_bulk_string(None) if count == 1 else encode_array([])
-        val, expiry = store[key]
-        if not isinstance(val, list):
-            return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
-        popped = []
-        for _ in range(min(count, len(val))):
-            popped.append(val.pop(0))
-        if not val:
-            del store[key]
+    elif cmd == "LPOP":
+        key = command_parts[1]
+        count = int(command_parts[2]) if len(command_parts) > 2 else 1
+        if key in store and isinstance(store[key], list) and store[key]:
+            popped = []
+            for _ in range(min(count, len(store[key]))):
+                popped.append(store[key].pop(0))
+            if count == 1:
+                conn.sendall(encode_resp(popped[0]))
+            else:
+                conn.sendall(encode_resp(popped))
         else:
-            store[key] = (val, expiry)
-        if count == 1:
-            return encode_bulk_string(popped[0]) if popped else encode_bulk_string(None)
-        return encode_array(popped)
+            conn.sendall(b"$-1\r\n")
 
     # BLPOP
-    elif cmd == 'BLPOP':
-        if len(parts) < 3:
-            return encode_error("ERR wrong number of arguments for 'blpop' command")
-        keys = parts[1:-1]
-        timeout = float(parts[-1])
+    elif cmd == "BLPOP":
+        keys = command_parts[1:-1]
+        timeout = float(command_parts[-1])
 
-        for key in keys:
-            if key in store:
-                val, expiry = store[key]
-                if isinstance(val, list) and val:
-                    item = val.pop(0)
-                    if not val:
-                        del store[key]
-                    else:
-                        store[key] = (val, expiry)
-                    return encode_array([key, item])
+        def try_pop():
+            for k in keys:
+                if k in store and isinstance(store[k], list) and store[k]:
+                    value = store[k].pop(0)
+                    return [k, value]
+            return None
 
-        if timeout == 0:
-            return encode_bulk_string(None)
+        result = try_pop()
+        if result:
+            conn.sendall(encode_resp(result))
+            return
 
-        with lock:
-            expire_at = time.time() + timeout
-            for key in keys:
-                waiting_clients.setdefault(key, []).append((conn, expire_at))
-        return None
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            result = try_pop()
+            if result:
+                conn.sendall(encode_resp(result))
+                return
+            time.sleep(0.05)
 
-    return encode_error("ERR unknown command")
+        conn.sendall(b"$-1\r\n")
 
-def client_thread(conn, addr):
+    else:
+        conn.sendall(b"-ERR unknown command\r\n")
+
+
+def client_thread(conn):
     buffer = b""
     while True:
         try:
@@ -176,57 +144,25 @@ def client_thread(conn, addr):
             if not data:
                 break
             buffer += data
-            while True:
-                parts, buffer = parse_resp(buffer)
-                if not parts:
+            while buffer:
+                command_parts, buffer = parse_resp(buffer)
+                if not command_parts:
                     break
-                response = handle_command(conn, parts)
-                if response is not None:
-                    conn.sendall(response)
+                handle_command(conn, command_parts)
         except ConnectionResetError:
-            break
-        except Exception as e:
-            conn.sendall(encode_error(f"ERR {str(e)}"))
             break
     conn.close()
 
-def blpop_watcher():
+
+def main():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("localhost", 6379))
+    s.listen()
     while True:
-        time.sleep(0.1)
-        now = time.time()
-        with lock:
-            for key, clients in list(waiting_clients.items()):
-                if key in store:
-                    val, expiry = store[key]
-                    if isinstance(val, list) and val:
-                        item = val.pop(0)
-                        if not val:
-                            del store[key]
-                        else:
-                            store[key] = (val, expiry)
-                        conn, _ = clients.pop(0)
-                        conn.sendall(encode_array([key, item]))
-                        if not clients:
-                            del waiting_clients[key]
-                        continue
-                new_clients = []
-                for conn, expire_at in clients:
-                    if now > expire_at:
-                        conn.sendall(encode_bulk_string(None))
-                    else:
-                        new_clients.append((conn, expire_at))
-                if new_clients:
-                    waiting_clients[key] = new_clients
-                else:
-                    del waiting_clients[key]
+        conn, _ = s.accept()
+        threading.Thread(target=client_thread, args=(conn,), daemon=True).start()
+
 
 if __name__ == "__main__":
-    threading.Thread(target=blpop_watcher, daemon=True).start()
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", 6379))
-    server.listen(5)
-    print("Redis clone running on port 6379")
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()
+    main()

@@ -144,6 +144,33 @@ def handle_command(conn, command_parts):
         # Timeout reached, return null array
         conn.sendall(b"*-1\r\n")
 
+    # LRANGE
+    elif cmd == "LRANGE":
+        key = command_parts[1]
+        start = int(command_parts[2])
+        stop = int(command_parts[3])
+        
+        if key not in store or not isinstance(store[key], list):
+            # Return empty array if key doesn't exist or isn't a list
+            conn.sendall(encode_resp([]))
+        else:
+            lst = store[key]
+            # Handle negative indices
+            if start < 0:
+                start = len(lst) + start
+            if stop < 0:
+                stop = len(lst) + stop
+            
+            # Clamp indices to valid range
+            start = max(0, start)
+            stop = min(len(lst) - 1, stop)
+            
+            if start <= stop and start < len(lst):
+                result = lst[start:stop + 1]
+                conn.sendall(encode_resp(result))
+            else:
+                conn.sendall(encode_resp([]))
+
     else:
         conn.sendall(b"-ERR unknown command\r\n")
 

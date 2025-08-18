@@ -106,6 +106,17 @@ def handle_command(conn, command_parts):
         store[key].extend(values)
         conn.sendall(encode_resp(len(store[key])))
 
+    # LPUSH
+    elif cmd == "LPUSH":
+        key = command_parts[1]
+        values = command_parts[2:]
+        if key not in store or not isinstance(store[key], list):
+            store[key] = []
+        # Insert at the beginning (reverse order to maintain correct sequence)
+        for value in reversed(values):
+            store[key].insert(0, value)
+        conn.sendall(encode_resp(len(store[key])))
+
     # LPOP
     elif cmd == "LPOP":
         key = command_parts[1]

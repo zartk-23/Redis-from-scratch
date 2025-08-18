@@ -43,10 +43,12 @@ def parse_resp(buffer):
     except (ValueError, IndexError):
         return None, buffer
 
-def encode_resp(data):
+def encode_resp(data, resp_type=None):
     """Encode Python object into RESP format."""
     if data is None:
-        return b"$-1\r\n"
+        if resp_type == "array":
+            return b"*-1\r\n"   # null array
+        return b"$-1\r\n"       # null bulk string
     if isinstance(data, str):
         return f"+{data}\r\n".encode()
     if isinstance(data, int):
@@ -137,7 +139,7 @@ def handle_client(conn, addr):
                                 break
                         else:
                             if timeout == 0:
-                                conn.sendall(encode_resp(None))
+                                conn.sendall(encode_resp(None, resp_type="array"))
                                 continue
                             client_cond = threading.Condition(lock)
                             for key in keys:
@@ -155,7 +157,8 @@ def handle_client(conn, addr):
                                                 return  # Exit after sending response
                                         client_cond.wait(timeout=remaining_time)
                                         remaining_time = end_time - time.time() if end_time else None
-                                    conn.sendall(encode_resp(None))
+                                    # Timeout reached
+                                    conn.sendall(encode_resp(None, resp_type="array"))
                             finally:
                                 for k in keys:
                                     if k in blpop_waiting:

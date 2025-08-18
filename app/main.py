@@ -47,6 +47,7 @@ def parse_resp(buffer):
     parts = [p for p in decoded.split("\r\n") if p]
     return parts, b""
 
+
 def handle_client(connection):
     with connection:
         buffer = b""
@@ -93,7 +94,7 @@ def handle_client(connection):
                 # GET
                 if command == "GET" and len(parts) >= 2:
                     key = parts[1]
-                    if key in store:
+                    if key in store and isinstance(store[key], tuple):
                         value, expiry = store[key]
                         if expiry and time.time() > expiry:
                             del store[key]
@@ -116,9 +117,27 @@ def handle_client(connection):
                     connection.sendall(resp.encode())
                     continue
 
+                # LRANGE
+                if command == "LRANGE" and len(parts) == 4:
+                    key = parts[1]
+                    start = int(parts[2])
+                    end = int(parts[3])
+                    if key not in store or not isinstance(store[key], list):
+                        connection.sendall(b"*0\r\n")
+                        continue
+
+                    elements = store[key][start:end+1]
+
+                    resp = f"*{len(elements)}\r\n"
+                    for el in elements:
+                        resp += f"${len(el)}\r\n{el}\r\n"
+                    connection.sendall(resp.encode())
+                    continue
+
                 # Unknown command
                 connection.sendall(b"-ERR unknown command\r\n")
                 continue
+
 
 def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -131,6 +150,7 @@ def main():
     while True:
         conn, _ = server_socket.accept()
         threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
 
 if __name__ == "__main__":
     main()

@@ -171,6 +171,16 @@ def handle_command(conn, command_parts):
             else:
                 conn.sendall(encode_resp([]))
 
+    # LLEN
+    elif cmd == "LLEN":
+        key = command_parts[1]
+        if key not in store or not isinstance(store[key], list):
+            # Return 0 if key doesn't exist or isn't a list
+            conn.sendall(encode_resp(0))
+        else:
+            # Return the length of the list
+            conn.sendall(encode_resp(len(store[key])))
+
     else:
         conn.sendall(b"-ERR unknown command\r\n")
 

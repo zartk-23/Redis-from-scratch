@@ -117,6 +117,19 @@ def handle_client(connection):
                     connection.sendall(resp.encode())
                     continue
 
+                # LPUSH
+                if command == "LPUSH" and len(parts) >= 3:
+                    key = parts[1]
+                    values = parts[2:]  # multiple values supported
+                    if key not in store or not isinstance(store[key], list):
+                        store[key] = []
+                    # Insert from left in order like Redis (last arg ends up at leftmost position)
+                    for value in values:
+                        store[key].insert(0, value)
+                    resp = f":{len(store[key])}\r\n"
+                    connection.sendall(resp.encode())
+                    continue
+
                 # LRANGE (with negative index support)
                 if command == "LRANGE" and len(parts) == 4:
                     key = parts[1]

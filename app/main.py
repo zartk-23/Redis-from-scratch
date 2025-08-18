@@ -37,7 +37,6 @@ def parse_resp(buffer):
     except Exception:
         return None, buffer
 
-
 def encode_resp(data):
     """Encode Python object into RESP format."""
     if data is None:
@@ -55,7 +54,6 @@ def encode_resp(data):
                 resp += f"${len(str(item))}\r\n{item}\r\n"
         return resp.encode()
     return b"-ERR Unsupported type\r\n"
-
 
 def handle_client(conn, addr):
     buffer = b""
@@ -124,8 +122,8 @@ def handle_client(conn, addr):
                         timeout = float(parts[-1])  # Parse timeout as float
                     except ValueError:
                         conn.sendall(b"-ERR value is not a valid float\r\n")
-                        break
-                    end_time = time.time() + timeout if timeout != 0 else None
+                        continue
+                    end_time = time.time() + timeout if timeout > 0 else None
                     with lock:
                         # Check if any list has items
                         for key in keys:
@@ -135,6 +133,9 @@ def handle_client(conn, addr):
                                 break
                         else:
                             # No items found, add client to waiting list
+                            if timeout == 0:
+                                conn.sendall(encode_resp(None))
+                                continue
                             client_cond = threading.Condition(lock)
                             for key in keys:
                                 if key not in blpop_waiting:
@@ -159,8 +160,9 @@ def handle_client(conn, addr):
                                             conn.sendall(encode_resp([key, val]))
                                             break
                                     else:
-                                        if timeout != 0 and time.time() >= end_time:
-                                            # Remove client from waiting list
+                                        remaining_time = end_time - time.time() if end_time else None
+                                        if remaining_time is not None and remaining_time <= 0:
+                                            # Timeout reached, remove client from waiting list
                                             for k in keys:
                                                 if k in blpop_waiting:
                                                     blpop_waiting[k] = [
@@ -172,22 +174,9 @@ def handle_client(conn, addr):
                                                         del blpop_waiting[k]
                                             conn.sendall(encode_resp(None))
                                             break
-                                        client_cond.wait(timeout=0.1 if timeout != 0 else None)
-                                        if timeout != 0 and time.time() >= end_time:
-                                            # Remove client from waiting list
-                                            for k in keys:
-                                                if k in blpop_waiting:
-                                                    blpop_waiting[k] = [
-                                                        (c, cond, t)
-                                                        for c, cond, t in blpop_waiting[k]
-                                                        if c != conn
-                                                    ]
-                                                    if not blpop_waiting[k]:
-                                                        del blpop_waiting[k]
-                                            conn.sendall(encode_resp(None))
-                                            break
-                                    if client_cond._is_owned():
-                                        break
+                                        client_cond.wait(timeout=remaining_time)
+                                        continue
+                                    break
                                 else:
                                     continue
                                 break
@@ -204,7 +193,6 @@ def handle_client(conn, addr):
                 del blpop_waiting[key]
     conn.close()
 
-
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -214,7 +202,6 @@ def start_server():
     while True:
         conn, addr = server.accept()
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-
 
 if __name__ == "__main__":
     start_server()

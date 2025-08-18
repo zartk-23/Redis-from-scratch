@@ -117,17 +117,39 @@ def handle_client(connection):
                     connection.sendall(resp.encode())
                     continue
 
-                # LRANGE
+                # LRANGE (with negative index support)
                 if command == "LRANGE" and len(parts) == 4:
                     key = parts[1]
                     start = int(parts[2])
                     end = int(parts[3])
+
                     if key not in store or not isinstance(store[key], list):
                         connection.sendall(b"*0\r\n")
                         continue
 
-                    elements = store[key][start:end+1]
+                    lst = store[key]
+                    n = len(lst)
 
+                    # Handle negative indexes
+                    if start < 0:
+                        start = n + start
+                    if end < 0:
+                        end = n + end
+
+                    # Clamp indexes
+                    if start < 0:
+                        start = 0
+                    if end < 0:
+                        end = 0
+                    if end >= n:
+                        end = n - 1
+                    if start >= n or start > end:
+                        connection.sendall(b"*0\r\n")
+                        continue
+
+                    elements = lst[start:end+1]
+
+                    # RESP array response
                     resp = f"*{len(elements)}\r\n"
                     for el in elements:
                         resp += f"${len(el)}\r\n{el}\r\n"

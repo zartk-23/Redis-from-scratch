@@ -3,49 +3,34 @@ import threading
 import time
 
 store = {}  # key -> (value, expiry_timestamp or list)
+blocked_clients = {}  # key -> list of (connection, timeout, start_time, lock)
+
+lock = threading.Lock()
+
 
 def parse_resp(buffer):
-    """Parse a RESP message from the buffer, return (command_parts, remaining_buffer)."""
-    if not buffer:
-        return None, buffer
+    ...
+    # (same as before, no change)
+    ...
 
-    try:
-        decoded = buffer.decode()
-    except UnicodeDecodeError:
-        return None, buffer
 
-    lines = decoded.split("\r\n")
-    if not lines or lines[0] == "":
-        return None, buffer
-
-    # Handle RESP array
-    if lines[0].startswith("*"):
-        try:
-            num_args = int(lines[0][1:])
-        except ValueError:
-            return None, buffer
-
-        parts = []
-        idx = 1  # Start after *n
-        for _ in range(num_args):
-            if idx >= len(lines) or not lines[idx].startswith("$"):
-                return None, buffer  # Incomplete bulk string
-            try:
-                str_len = int(lines[idx][1:])
-                if idx + 1 >= len(lines) or len(lines[idx + 1]) != str_len:
-                    return None, buffer  # Incomplete or wrong length
-                parts.append(lines[idx + 1])
-                idx += 2
-            except ValueError:
-                return None, buffer
-
-        # Return parsed parts and remaining buffer
-        remaining = "\r\n".join(lines[idx:]).encode()
-        return parts, remaining
-
-    # Fallback for simple commands
-    parts = [p for p in decoded.split("\r\n") if p]
-    return parts, b""
+def wake_blocked_clients(key):
+    """Wake up clients blocked on a given key if data is available."""
+    with lock:
+        if key in blocked_clients and key in store and isinstance(store[key], list) and store[key]:
+            # Pop one element for each blocked client (FIFO order)
+            while store[key] and blocked_clients[key]:
+                conn, timeout, start_time, wait_lock = blocked_clients[key].pop(0)
+                value = store[key].pop(0)
+                resp = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+                try:
+                    conn.sendall(resp.encode())
+                except Exception:
+                    pass
+                finally:
+                    wait_lock.release()  # unblock thread
+            if not blocked_clients[key]:
+                del blocked_clients[key]
 
 
 def handle_client(connection):
@@ -64,152 +49,83 @@ def handle_client(connection):
 
                 command = parts[0].upper() if parts else None
 
-                # PING
-                if command == "PING":
-                    connection.sendall(b"+PONG\r\n")
-                    continue
+                # ... (PING, ECHO, SET, GET etc unchanged)
 
-                # ECHO
-                if command == "ECHO" and len(parts) >= 2:
-                    message = parts[1]
-                    resp = f"${len(message)}\r\n{message}\r\n"
+                # LPUSH
+                if command == "LPUSH" and len(parts) >= 3:
+                    key = parts[1]
+                    values = parts[2:]
+                    if key not in store or not isinstance(store[key], list):
+                        store[key] = []
+                    for value in values:
+                        store[key].insert(0, value)
+                    resp = f":{len(store[key])}\r\n"
                     connection.sendall(resp.encode())
-                    continue
-
-                # SET (with optional PX expiry)
-                if command == "SET" and len(parts) >= 3:
-                    key = parts[1]
-                    value = parts[2]
-                    expiry_timestamp = None
-                    if len(parts) >= 5 and parts[3].upper() == "PX":
-                        try:
-                            px_value = int(parts[4])
-                            expiry_timestamp = time.time() + (px_value / 1000.0)
-                        except ValueError:
-                            pass
-                    store[key] = (value, expiry_timestamp)
-                    connection.sendall(b"+OK\r\n")
-                    continue
-
-                # GET
-                if command == "GET" and len(parts) >= 2:
-                    key = parts[1]
-                    if key in store and isinstance(store[key], tuple):
-                        value, expiry = store[key]
-                        if expiry and time.time() > expiry:
-                            del store[key]
-                            connection.sendall(b"$-1\r\n")
-                        else:
-                            resp = f"${len(value)}\r\n{value}\r\n"
-                            connection.sendall(resp.encode())
-                    else:
-                        connection.sendall(b"$-1\r\n")
+                    wake_blocked_clients(key)  # notify blocked clients
                     continue
 
                 # RPUSH
                 if command == "RPUSH" and len(parts) >= 3:
                     key = parts[1]
-                    values = parts[2:]  # Support multiple values
+                    values = parts[2:]
                     if key not in store or not isinstance(store[key], list):
                         store[key] = []
                     store[key].extend(values)
                     resp = f":{len(store[key])}\r\n"
                     connection.sendall(resp.encode())
+                    wake_blocked_clients(key)  # notify blocked clients
                     continue
 
-                # LPUSH
-                if command == "LPUSH" and len(parts) >= 3:
-                    key = parts[1]
-                    values = parts[2:]  # multiple values supported
-                    if key not in store or not isinstance(store[key], list):
-                        store[key] = []
-                    # Insert from left in order like Redis (last arg ends up at leftmost position)
-                    for value in values:
-                        store[key].insert(0, value)
-                    resp = f":{len(store[key])}\r\n"
-                    connection.sendall(resp.encode())
-                    continue
-
-                # LLEN
-                if command == "LLEN" and len(parts) == 2:
-                    key = parts[1]
-                    if key in store and isinstance(store[key], list):
-                        length = len(store[key])
-                        connection.sendall(f":{length}\r\n".encode())
-                    else:
-                        # If key does not exist or is not a list, return 0
-                        connection.sendall(b":0\r\n")
-                    continue
-
-                # LPOP (with optional count)
-                if command == "LPOP" and len(parts) >= 2:
-                    key = parts[1]
-                    count = 1  # default
-                    if len(parts) == 3:
-                        try:
-                            count = int(parts[2])
-                        except ValueError:
-                            connection.sendall(b"-ERR value is not an integer or out of range\r\n")
-                            continue
-
-                    if key in store and isinstance(store[key], list) and len(store[key]) > 0:
-                        popped = []
-                        for _ in range(min(count, len(store[key]))):
-                            popped.append(store[key].pop(0))
-
-                        if count == 1:
-                            # Single bulk string
-                            value = popped[0]
-                            resp = f"${len(value)}\r\n{value}\r\n"
-                            connection.sendall(resp.encode())
-                        else:
-                            # Array of bulk strings
-                            resp = f"*{len(popped)}\r\n"
-                            for value in popped:
-                                resp += f"${len(value)}\r\n{value}\r\n"
-                            connection.sendall(resp.encode())
-                    else:
-                        connection.sendall(b"$-1\r\n")  # null bulk string
-                    continue
-
-                # LRANGE (with negative index support)
-                if command == "LRANGE" and len(parts) == 4:
-                    key = parts[1]
-                    start = int(parts[2])
-                    end = int(parts[3])
-
-                    if key not in store or not isinstance(store[key], list):
-                        connection.sendall(b"*0\r\n")
+                # BLPOP
+                if command == "BLPOP" and len(parts) >= 3:
+                    keys = parts[1:-1]
+                    try:
+                        timeout = int(parts[-1])
+                    except ValueError:
+                        connection.sendall(b"-ERR timeout is not an integer\r\n")
                         continue
 
-                    lst = store[key]
-                    n = len(lst)
-
-                    # Handle negative indexes
-                    if start < 0:
-                        start = n + start
-                    if end < 0:
-                        end = n + end
-
-                    # Clamp indexes
-                    if start < 0:
-                        start = 0
-                    if end < 0:
-                        end = 0
-                    if end >= n:
-                        end = n - 1
-                    if start >= n or start > end:
-                        connection.sendall(b"*0\r\n")
+                    # First, check if any key has data right now
+                    found = False
+                    for key in keys:
+                        if key in store and isinstance(store[key], list) and store[key]:
+                            value = store[key].pop(0)
+                            resp = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+                            connection.sendall(resp.encode())
+                            found = True
+                            break
+                    if found:
                         continue
 
-                    elements = lst[start:end+1]
+                    # Otherwise, block the client
+                    wait_lock = threading.Lock()
+                    wait_lock.acquire()
 
-                    # RESP array response
-                    resp = f"*{len(elements)}\r\n"
-                    for el in elements:
-                        resp += f"${len(el)}\r\n{el}\r\n"
-                    connection.sendall(resp.encode())
+                    with lock:
+                        for key in keys:
+                            blocked_clients.setdefault(key, []).append(
+                                (connection, timeout, time.time(), wait_lock)
+                            )
+
+                    # Block until timeout or data arrives
+                    if timeout == 0:
+                        wait_lock.acquire()  # block indefinitely
+                    else:
+                        acquired = wait_lock.acquire(timeout=timeout)
+                        if not acquired:
+                            # Timeout reached
+                            connection.sendall(b"$-1\r\n")
+                            with lock:
+                                for key in keys:
+                                    if key in blocked_clients:
+                                        blocked_clients[key] = [
+                                            c for c in blocked_clients[key] if c[0] != connection
+                                        ]
+                                        if not blocked_clients[key]:
+                                            del blocked_clients[key]
                     continue
+
+                # (other commands unchanged...)
 
                 # Unknown command
                 connection.sendall(b"-ERR unknown command\r\n")

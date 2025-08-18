@@ -110,26 +110,17 @@ def handle_command(conn, command_parts):
         keys = command_parts[1:-1]
         timeout = float(command_parts[-1])
 
-        def try_pop():
+        end_time = time.time() + timeout
+
+        while time.time() < end_time:
             for k in keys:
                 if k in store and isinstance(store[k], list) and store[k]:
                     value = store[k].pop(0)
-                    return [k, value]
-            return None
-
-        result = try_pop()
-        if result:
-            conn.sendall(encode_resp(result))
-            return
-
-        end_time = time.time() + timeout
-        while time.time() < end_time:
-            result = try_pop()
-            if result:
-                conn.sendall(encode_resp(result))
-                return
+                    conn.sendall(encode_resp([k, value]))
+                    return
             time.sleep(0.05)
 
+        # Timeout reached, return NIL
         conn.sendall(b"$-1\r\n")
 
     else:

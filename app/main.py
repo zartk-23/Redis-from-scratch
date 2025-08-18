@@ -141,13 +141,33 @@ def handle_client(connection):
                         connection.sendall(b":0\r\n")
                     continue
 
-                # LPOP
-                if command == "LPOP" and len(parts) == 2:
+                # LPOP (with optional count)
+                if command == "LPOP" and len(parts) >= 2:
                     key = parts[1]
+                    count = 1  # default
+                    if len(parts) == 3:
+                        try:
+                            count = int(parts[2])
+                        except ValueError:
+                            connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+                            continue
+
                     if key in store and isinstance(store[key], list) and len(store[key]) > 0:
-                        value = store[key].pop(0)  # remove first element
-                        resp = f"${len(value)}\r\n{value}\r\n"
-                        connection.sendall(resp.encode())
+                        popped = []
+                        for _ in range(min(count, len(store[key]))):
+                            popped.append(store[key].pop(0))
+
+                        if count == 1:
+                            # Single bulk string
+                            value = popped[0]
+                            resp = f"${len(value)}\r\n{value}\r\n"
+                            connection.sendall(resp.encode())
+                        else:
+                            # Array of bulk strings
+                            resp = f"*{len(popped)}\r\n"
+                            for value in popped:
+                                resp += f"${len(value)}\r\n{value}\r\n"
+                            connection.sendall(resp.encode())
                     else:
                         connection.sendall(b"$-1\r\n")  # null bulk string
                     continue

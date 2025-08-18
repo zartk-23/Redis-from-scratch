@@ -14,18 +14,34 @@ def parse_resp(buffer):
 
     if buffer.startswith(b"*"):
         lines = buffer.split(b"\r\n")
-        n = int(lines[0][1:])
+        if len(lines) < 1:
+            return None, buffer
+        
+        try:
+            n = int(lines[0][1:])
+        except (ValueError, IndexError):
+            return None, buffer
+            
         parts = []
         idx = 1
         for _ in range(n):
-            if lines[idx].startswith(b"$"):
+            if idx >= len(lines) or not lines[idx].startswith(b"$"):
+                return None, buffer
+            try:
                 length = int(lines[idx][1:])
+                if idx + 1 >= len(lines):
+                    return None, buffer
                 parts.append(lines[idx + 1].decode())
                 idx += 2
+            except (ValueError, IndexError):
+                return None, buffer
         return parts, b"\r\n".join(lines[idx:])
     else:
-        parts = buffer.decode().strip().split()
-        return parts, b""
+        try:
+            parts = buffer.decode().strip().split()
+            return parts, b""
+        except UnicodeDecodeError:
+            return None, buffer
 
 
 def encode_resp(data):
@@ -110,17 +126,22 @@ def handle_command(conn, command_parts):
         keys = command_parts[1:-1]
         timeout = float(command_parts[-1])
 
+        # Special case: timeout 0 means block indefinitely
+        if timeout == 0:
+            timeout = float('inf')
+            
         end_time = time.time() + timeout
 
         while time.time() < end_time:
             for k in keys:
                 if k in store and isinstance(store[k], list) and store[k]:
                     value = store[k].pop(0)
+                    # Return array with key and value
                     conn.sendall(encode_resp([k, value]))
                     return
-            time.sleep(0.05)
+            time.sleep(0.01)  # Reduced sleep time for better responsiveness
 
-        # Timeout reached, return null array (not null bulk string)
+        # Timeout reached, return null array
         conn.sendall(b"*-1\r\n")
 
     else:

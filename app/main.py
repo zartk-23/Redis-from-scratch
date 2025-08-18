@@ -125,25 +125,41 @@ def handle_client(conn, addr):
                             val = store[key].pop(0)
                             send_resp(conn, val)
 
-                elif command == "BLPOP":
-                    keys, timeout = parts[1:-1], float(parts[-1])
-                    end_time = time.time() + timeout if timeout > 0 else None
+                elif cmd == "BLPOP":
+                    if len(parts) < 3:
+                        client.sendall(b"-ERR wrong number of arguments for 'blpop' command\r\n")
+                        continue
+
+                    keys = parts[1:-1]
+                    try:
+                        timeout = float(parts[-1])
+                    except ValueError:
+                        client.sendall(b"-ERR invalid timeout\r\n")
+                        continue
+
                     popped = None
+                    start_time = time.time()
 
                     while True:
-                        with lock:
-                            for key in keys:
-                                if key in store and isinstance(store[key], list) and store[key]:
-                                    popped = [key, store[key].pop(0)]
-                                    break
+                        # check all keys
+                        for k in keys:
+                            if k in store and isinstance(store[k], list) and store[k]:
+                                popped = (k, store[k].pop(0))
+                                break
+
                         if popped:
-                            send_resp(conn, popped)
+                            key, val = popped
+                            response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
+                            client.sendall(response.encode())
                             break
 
-                        now = time.time()
-                        if timeout > 0 and now >= end_time:
-                            send_resp(conn, None)
+                        # timeout check
+                        if timeout != 0 and (time.time() - start_time) >= timeout:
+                            client.sendall(b"$-1\r\n")  # Null bulk string on timeout
                             break
+
+                        time.sleep(0.05)  # short sleep to avoid busy loop
+
 
                         # register client for blocking
                         for key in keys:

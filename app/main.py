@@ -20,7 +20,7 @@ def parse_resp(buffer):
     if not decoded.startswith("*"):
         return None, buffer
 
-    lines = decoded.split("\r\n\t")
+    lines = decoded.split("\r\n")
     try:
         count = int(lines[0][1:])
         parts = []
@@ -30,10 +30,12 @@ def parse_resp(buffer):
                 return None, buffer
             strlen = int(lines[idx][1:])
             idx += 1
+            if idx >= len(lines) or len(lines[idx]) != strlen:
+                return None, buffer
             parts.append(lines[idx])
             idx += 1
         remaining = "\r\n".join(lines[idx:]).encode()
-        return(platform, parts, remaining)
+        return parts, remaining
     except Exception:
         return None, buffer
 

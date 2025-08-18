@@ -22,11 +22,15 @@ def parse_resp(buffer):
 
     lines = decoded.split("\r\n")
     try:
+        if len(lines) < 1 or not lines[0].startswith("*"):
+            return None, buffer
         count = int(lines[0][1:])
+        if count < 1:
+            return None, buffer
         parts = []
         idx = 1
         for _ in range(count):
-            if not lines[idx].startswith("$"):
+            if idx + 1 >= len(lines) or not lines[idx].startswith("$"):
                 return None, buffer
             strlen = int(lines[idx][1:])
             idx += 1
@@ -34,9 +38,9 @@ def parse_resp(buffer):
                 return None, buffer
             parts.append(lines[idx])
             idx += 1
-        remaining = "\r\n".join(lines[idx:]).encode()
+        remaining = "\r\n".join(lines[idx:]).encode() if idx < len(lines) else b""
         return parts, remaining
-    except Exception:
+    except (ValueError, IndexError):
         return None, buffer
 
 def encode_resp(data):
@@ -105,7 +109,6 @@ def handle_client(conn, addr):
                         if key not in store or not isinstance(store[key][0], list):
                             store[key] = ([], None)
                         store[key][0][0:0] = values
-                        # Notify waiting BLPOP clients
                         if key in blpop_waiting:
                             for client_conn, client_cond, _ in blpop_waiting[key][:]:
                                 with client_cond:
@@ -121,20 +124,18 @@ def handle_client(conn, addr):
                 elif command == "BLPOP":
                     keys = parts[1:-1]
                     try:
-                        timeout = float(parts[-1])  # Parse timeout as float
+                        timeout = float(parts[-1])
                     except ValueError:
                         conn.sendall(b"-ERR value is not a valid float\r\n")
                         continue
                     end_time = time.time() + timeout if timeout > 0 else None
                     with lock:
-                        # Check if any list has items
                         for key in keys:
                             if key in store and isinstance(store[key][0], list) and store[key][0]:
                                 val = store[key][0].pop(0)
                                 conn.sendall(encode_resp([key, val]))
                                 break
                         else:
-                            # No items found, handle zero or non-zero timeout
                             if timeout == 0:
                                 conn.sendall(encode_resp(None))
                                 continue
@@ -145,23 +146,17 @@ def handle_client(conn, addr):
                                 blpop_waiting[key].append((conn, client_cond, end_time))
                             try:
                                 with client_cond:
-                                    while True:
-                                        # Check for items again
+                                    remaining_time = end_time - time.time() if end_time else None
+                                    while remaining_time is None or remaining_time > 0:
                                         for key in keys:
                                             if key in store and isinstance(store[key][0], list) and store[key][0]:
                                                 val = store[key][0].pop(0)
                                                 conn.sendall(encode_resp([key, val]))
-                                                break
-                                        else:
-                                            remaining_time = end_time - time.time() if end_time else None
-                                            if remaining_time is not None and remaining_time <= 0:
-                                                conn.sendall(encode_resp(None))
-                                                break
-                                            client_cond.wait(timeout=remaining_time)
-                                            continue
-                                        break
+                                                return  # Exit after sending response
+                                        client_cond.wait(timeout=remaining_time)
+                                        remaining_time = end_time - time.time() if end_time else None
+                                    conn.sendall(encode_resp(None))
                             finally:
-                                # Always clean up waiting list
                                 for k in keys:
                                     if k in blpop_waiting:
                                         blpop_waiting[k] = [
@@ -176,7 +171,6 @@ def handle_client(conn, addr):
         except Exception as e:
             print(f"Error handling client {addr}: {e}")
             break
-    # Clean up waiting clients on disconnect
     with lock:
         for key in list(blpop_waiting.keys()):
             blpop_waiting[key] = [(c, cond, t) for c, cond, t in blpop_waiting[key] if c != conn]

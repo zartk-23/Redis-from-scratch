@@ -120,8 +120,8 @@ def handle_command(conn, command_parts):
                     return
             time.sleep(0.05)
 
-        # Timeout reached, return NIL
-        conn.sendall(b"$-1\r\n")
+        # Timeout reached, return null array (not null bulk string)
+        conn.sendall(b"*-1\r\n")
 
     else:
         conn.sendall(b"-ERR unknown command\r\n")

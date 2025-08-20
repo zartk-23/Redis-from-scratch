@@ -266,8 +266,18 @@ def encode_resp(data):
         for item in data:
             if item is None:
                 out += "$-1\r\n"
+            elif isinstance(item, str):
+                out += f"${len(item)}\r\n{item}\r\n"
+            elif isinstance(item, int):
+                out += f":{item}\r\n"
+            elif isinstance(item, list):
+                # Recursively encode nested arrays
+                nested = encode_resp(item).decode()
+                out += nested
             else:
-                out += f"${len(str(item))}\r\n{item}\r\n"
+                # Convert to string if unknown type
+                item_str = str(item)
+                out += f"${len(item_str)}\r\n{item_str}\r\n"
         return out.encode()
     return b"+OK\r\n"
 

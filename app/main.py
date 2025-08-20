@@ -5,6 +5,7 @@ import time
 store = {}  # key -> (value, expiry_timestamp, list, or stream)
 expiry = {}  # key -> expiry timestamp
 blocking_clients = {}  # key -> [(conn, timeout_end_time)]
+blocking_clients_lock = threading.Lock()  # Lock for thread-safe access to blocking_clients
 
 
 def generate_stream_id(stream_key, provided_id=None):
@@ -181,39 +182,80 @@ def validate_final_id(stream_key, entry_id):
             return False
     else:
         return False
-    """Validate that the final entry ID is greater than the last entry ID."""
-    try:
-        timestamp_str, seq_str = entry_id.split('-')
-        timestamp = int(timestamp_str)
-        sequence = int(seq_str)
-    except (ValueError, IndexError):
-        return False
-    
-    # Check if ID is greater than 0-0 (minimum valid ID)
-    if timestamp == 0 and sequence == 0:
-        return False
-    
-    # If stream doesn't exist or is empty, any ID > 0-0 is valid
-    if (stream_key not in store or 
-        not isinstance(store[stream_key], dict) or 
-        not store[stream_key].get('entries')):
-        return True
-    
-    # Get the last entry ID
-    stream = store[stream_key]
-    last_id = list(stream['entries'].keys())[-1]
-    last_timestamp, last_sequence = map(int, last_id.split('-'))
-    
-    # Validate that new ID is greater than last ID
-    if timestamp > last_timestamp:
-        return True
-    elif timestamp == last_timestamp:
-        if sequence > last_sequence:
-            return True
-        else:
-            return False
-    else:
-        return False
+
+
+def notify_blocking_clients(stream_key):
+    """Notify all blocking clients waiting on a specific stream."""
+    with blocking_clients_lock:
+        if stream_key in blocking_clients:
+            for client_info in blocking_clients[stream_key][:]:  # Copy list to avoid modification during iteration
+                conn, stream_keys, stream_ids, timeout_end = client_info
+                try:
+                    # Check if we have new entries for this client
+                    result = []
+                    for i, key in enumerate(stream_keys):
+                        if key == stream_key:
+                            start_id = stream_ids[i]
+                            
+                            # Check if stream exists and has new entries
+                            if (key in store and 
+                                isinstance(store[key], dict) and 
+                                store[key].get('entries')):
+                                
+                                stream = store[key]
+                                entries = stream['entries']
+                                
+                                # Find entries after the specified start_id
+                                stream_entries = []
+                                for entry_id in entries:
+                                    if compare_stream_ids(entry_id, start_id) > 0:
+                                        # Format entry data as [field1, value1, field2, value2, ...]
+                                        entry_data = entries[entry_id]
+                                        field_value_list = []
+                                        for field, value in entry_data.items():
+                                            field_value_list.extend([field, value])
+                                        stream_entries.append([entry_id, field_value_list])
+                                
+                                # Only include streams that have entries
+                                if stream_entries:
+                                    result.append([key, stream_entries])
+                    
+                    if result:
+                        # Send result to client and remove from blocking list
+                        conn.sendall(encode_resp(result))
+                        blocking_clients[stream_key].remove(client_info)
+                        if not blocking_clients[stream_key]:
+                            del blocking_clients[stream_key]
+                        
+                except Exception:
+                    # Remove client if there's an error (connection closed, etc.)
+                    if client_info in blocking_clients[stream_key]:
+                        blocking_clients[stream_key].remove(client_info)
+                    if not blocking_clients[stream_key]:
+                        del blocking_clients[stream_key]
+
+
+def cleanup_expired_blocking_clients():
+    """Remove expired blocking clients and send timeout responses."""
+    while True:
+        current_time = time.time()
+        with blocking_clients_lock:
+            for stream_key in list(blocking_clients.keys()):
+                for client_info in blocking_clients[stream_key][:]:  # Copy to avoid modification during iteration
+                    conn, stream_keys, stream_ids, timeout_end = client_info
+                    if current_time >= timeout_end:
+                        try:
+                            # Send null response for timeout
+                            conn.sendall(b"$-1\r\n")
+                        except Exception:
+                            pass  # Client connection might be closed
+                        
+                        # Remove client from blocking list
+                        blocking_clients[stream_key].remove(client_info)
+                        if not blocking_clients[stream_key]:
+                            del blocking_clients[stream_key]
+        
+        time.sleep(0.1)  # Check every 100ms
 
 
 def parse_resp(buffer):
@@ -480,6 +522,9 @@ def handle_command(conn, command_parts):
         # Add entry to stream
         store[key]['entries'][entry_id] = entry_data
         
+        # Notify blocking clients waiting on this stream
+        notify_blocking_clients(key)
+        
         # Return the generated/used ID
         conn.sendall(encode_resp(entry_id))
 
@@ -540,10 +585,27 @@ def handle_command(conn, command_parts):
             conn.sendall(b"-ERR wrong number of arguments\r\n")
             return
         
+        # Parse optional BLOCK parameter
+        block_timeout = None
+        args_start_index = 1
+        
+        if len(command_parts) > 1 and command_parts[1].upper() == "BLOCK":
+            if len(command_parts) < 6:  # Need at least XREAD BLOCK timeout STREAMS key id
+                conn.sendall(b"-ERR wrong number of arguments\r\n")
+                return
+            try:
+                block_timeout = int(command_parts[2]) / 1000.0  # Convert ms to seconds
+                if block_timeout == 0:
+                    block_timeout = float('inf')  # 0 means block indefinitely
+                args_start_index = 3
+            except ValueError:
+                conn.sendall(b"-ERR timeout is not an integer or out of range\r\n")
+                return
+        
         # Find "streams" keyword
         streams_index = -1
-        for i, part in enumerate(command_parts):
-            if part.upper() == "STREAMS":
+        for i in range(args_start_index, len(command_parts)):
+            if command_parts[i].upper() == "STREAMS":
                 streams_index = i
                 break
         
@@ -561,7 +623,7 @@ def handle_command(conn, command_parts):
         stream_keys = remaining_args[:num_streams]
         stream_ids = remaining_args[num_streams:]
         
-        # Process each stream
+        # Process each stream to get immediate results
         result = []
         for i in range(num_streams):
             stream_key = stream_keys[i]
@@ -591,7 +653,19 @@ def handle_command(conn, command_parts):
             if stream_entries:
                 result.append([stream_key, stream_entries])
         
-        conn.sendall(encode_resp(result))
+        # If we have immediate results or no blocking, return immediately
+        if result or block_timeout is None:
+            conn.sendall(encode_resp(result))
+        else:
+            # No immediate results and blocking requested
+            timeout_end = time.time() + block_timeout
+            
+            # Add client to blocking list for all requested streams
+            with blocking_clients_lock:
+                for stream_key in stream_keys:
+                    if stream_key not in blocking_clients:
+                        blocking_clients[stream_key] = []
+                    blocking_clients[stream_key].append((conn, stream_keys, stream_ids, timeout_end))
 
     else:
         conn.sendall(b"-ERR unknown command\r\n")
@@ -612,10 +686,16 @@ def client_thread(conn):
                 handle_command(conn, command_parts)
         except ConnectionResetError:
             break
+        except Exception:
+            break
     conn.close()
 
 
 def main():
+    # Start cleanup thread for expired blocking clients
+    cleanup_thread = threading.Thread(target=cleanup_expired_blocking_clients, daemon=True)
+    cleanup_thread.start()
+    
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("localhost", 6379))

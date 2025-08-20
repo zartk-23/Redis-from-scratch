@@ -15,26 +15,38 @@ def generate_stream_id(stream_key, provided_id=None):
         # Use provided ID (validate format later if needed)
         return provided_id
     
-    # Auto-generate ID: timestamp-sequence
-    if stream_key not in store or not isinstance(store[stream_key], dict):
-        # First entry in stream
+    # Auto-generate full ID using current timestamp
+    if (stream_key not in store or 
+        not isinstance(store[stream_key], dict) or 
+        not store[stream_key].get('entries')):
+        # First entry in stream - use current time with sequence 0
         return f"{current_time_ms}-0"
     
     stream = store[stream_key]
-    if not stream.get('entries'):
-        return f"{current_time_ms}-0"
     
-    # Get the last ID to ensure uniqueness
-    last_id = list(stream['entries'].keys())[-1]
-    last_timestamp, last_seq = map(int, last_id.split('-'))
+    # Check if current timestamp already exists in stream
+    max_seq_for_current_time = -1
+    for entry_id in stream['entries']:
+        entry_timestamp, entry_seq = map(int, entry_id.split('-'))
+        if entry_timestamp == current_time_ms and entry_seq > max_seq_for_current_time:
+            max_seq_for_current_time = entry_seq
     
-    if current_time_ms > last_timestamp:
-        return f"{current_time_ms}-0"
-    elif current_time_ms == last_timestamp:
-        return f"{current_time_ms}-{last_seq + 1}"
+    if max_seq_for_current_time >= 0:
+        # Current timestamp exists, increment sequence
+        return f"{current_time_ms}-{max_seq_for_current_time + 1}"
     else:
-        # Current time is behind last timestamp, increment sequence
-        return f"{last_timestamp}-{last_seq + 1}"
+        # Current timestamp doesn't exist, use sequence 0
+        # But make sure the ID is greater than the last entry
+        last_id = list(stream['entries'].keys())[-1]
+        last_timestamp, last_seq = map(int, last_id.split('-'))
+        
+        if current_time_ms > last_timestamp:
+            return f"{current_time_ms}-0"
+        elif current_time_ms == last_timestamp:
+            return f"{current_time_ms}-{last_seq + 1}"
+        else:
+            # Current time is behind last timestamp, use last timestamp with incremented sequence
+            return f"{last_timestamp}-{last_seq + 1}"
 
 
 def generate_sequence_number(stream_key, timestamp):
@@ -353,10 +365,10 @@ def handle_command(conn, command_parts):
         
         # Handle different ID formats
         if entry_id == "*":
-            # Auto-generate full ID (will be implemented in next stage)
+            # Auto-generate full ID (timestamp and sequence)
             entry_id = generate_stream_id(key)
         elif entry_id.endswith('-*'):
-            # Auto-generate sequence number
+            # Auto-generate sequence number only
             is_valid, final_id = validate_stream_id(key, entry_id)
             if not is_valid:
                 if final_id.split('-')[0] == '0' and final_id.split('-')[1] == '0':

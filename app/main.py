@@ -356,8 +356,21 @@ def handle_command(conn, command_parts):
         if conn not in client_transactions:
             conn.sendall(b"-ERR EXEC without MULTI\r\n")
         else:
-            # This will be implemented in the next stage
-            conn.sendall(b"-ERR EXEC implementation pending\r\n")
+            # Get the queued commands for this client
+            queued_commands = client_transactions[conn]
+            
+            # Execute all queued commands and collect responses
+            responses = []
+            for command in queued_commands:
+                # For now, this will be implemented in later stages
+                # Empty transaction case: no commands queued
+                pass
+            
+            # Send the array of responses (empty array for empty transaction)
+            conn.sendall(encode_resp(responses))
+            
+            # End the transaction by removing client from transaction state
+            del client_transactions[conn]
 
     # SET
     elif cmd == "SET":

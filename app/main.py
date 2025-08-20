@@ -368,7 +368,6 @@ def handle_command(conn, command_parts):
             del store[key]
             del expiry[key]
         
-        # For this stage, we only handle the case where key exists and has a numerical value
         if key in store and isinstance(store[key], str):
             try:
                 # Try to convert the value to an integer
@@ -383,8 +382,10 @@ def handle_command(conn, command_parts):
                 # Value is not a valid integer - this will be handled in later stages
                 conn.sendall(b"-ERR value is not an integer or out of range\r\n")
         else:
-            # Key doesn't exist - this will be handled in later stages
-            conn.sendall(b"-ERR no such key\r\n")
+            # Key doesn't exist - treat as if value was 0, then increment to 1
+            new_value = 1
+            store[key] = str(new_value)
+            conn.sendall(encode_resp(new_value))
 
     # RPUSH
     elif cmd == "RPUSH":

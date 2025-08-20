@@ -534,6 +534,65 @@ def handle_command(conn, command_parts):
         
         conn.sendall(encode_resp(result))
 
+    # XREAD
+    elif cmd == "XREAD":
+        if len(command_parts) < 4:
+            conn.sendall(b"-ERR wrong number of arguments\r\n")
+            return
+        
+        # Find "streams" keyword
+        streams_index = -1
+        for i, part in enumerate(command_parts):
+            if part.upper() == "STREAMS":
+                streams_index = i
+                break
+        
+        if streams_index == -1:
+            conn.sendall(b"-ERR syntax error\r\n")
+            return
+        
+        # Parse stream keys and IDs
+        remaining_args = command_parts[streams_index + 1:]
+        if len(remaining_args) % 2 != 0:
+            conn.sendall(b"-ERR wrong number of arguments\r\n")
+            return
+        
+        num_streams = len(remaining_args) // 2
+        stream_keys = remaining_args[:num_streams]
+        stream_ids = remaining_args[num_streams:]
+        
+        # Process each stream
+        result = []
+        for i in range(num_streams):
+            stream_key = stream_keys[i]
+            start_id = stream_ids[i]
+            
+            # Check if stream exists
+            if (stream_key not in store or 
+                not isinstance(store[stream_key], dict) or 
+                not store[stream_key].get('entries')):
+                continue
+            
+            stream = store[stream_key]
+            entries = stream['entries']
+            
+            # Find entries after the specified start_id
+            stream_entries = []
+            for entry_id in entries:
+                if compare_stream_ids(entry_id, start_id) > 0:
+                    # Format entry data as [field1, value1, field2, value2, ...]
+                    entry_data = entries[entry_id]
+                    field_value_list = []
+                    for field, value in entry_data.items():
+                        field_value_list.extend([field, value])
+                    stream_entries.append([entry_id, field_value_list])
+            
+            # Only include streams that have entries
+            if stream_entries:
+                result.append([stream_key, stream_entries])
+        
+        conn.sendall(encode_resp(result))
+
     else:
         conn.sendall(b"-ERR unknown command\r\n")
 

@@ -626,9 +626,141 @@ def handle_command(conn, command_parts):
         
         # Process each stream to get immediate results
         result = []
+        processed_stream_ids = []  # Store the actual IDs used for comparison
+        
         for i in range(num_streams):
             stream_key = stream_keys[i]
             start_id = stream_ids[i]
+            
+            # Handle special '
+        
+        # If we have immediate results or no blocking, return immediately
+        if result or block_timeout is None:
+            conn.sendall(encode_resp(result))
+        else:
+            # No immediate results and blocking requested
+            timeout_end = time.time() + block_timeout
+            
+            # Add client to blocking list for all requested streams
+            # Use the processed IDs (with $ resolved) for blocking
+            with blocking_clients_lock:
+                for stream_key in stream_keys:
+                    if stream_key not in blocking_clients:
+                        blocking_clients[stream_key] = []
+                    blocking_clients[stream_key].append((conn, stream_keys, processed_stream_ids, timeout_end))
+
+    else:
+        conn.sendall(b"-ERR unknown command\r\n")
+
+
+def client_thread(conn):
+    buffer = b""
+    while True:
+        try:
+            data = conn.recv(4096)
+            if not data:
+                break
+            buffer += data
+            while buffer:
+                command_parts, buffer = parse_resp(buffer)
+                if not command_parts:
+                    break
+                handle_command(conn, command_parts)
+        except ConnectionResetError:
+            break
+        except Exception:
+            break
+    conn.close()
+
+
+def main():
+    # Start cleanup thread for expired blocking clients
+    cleanup_thread = threading.Thread(target=cleanup_expired_blocking_clients, daemon=True)
+    cleanup_thread.start()
+    
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("localhost", 6379))
+    s.listen()
+    while True:
+        conn, _ = s.accept()
+        threading.Thread(target=client_thread, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main() ID - means "only new entries"
+            if start_id == '
+        
+        # If we have immediate results or no blocking, return immediately
+        if result or block_timeout is None:
+            conn.sendall(encode_resp(result))
+        else:
+            # No immediate results and blocking requested
+            timeout_end = time.time() + block_timeout
+            
+            # Add client to blocking list for all requested streams
+            with blocking_clients_lock:
+                for stream_key in stream_keys:
+                    if stream_key not in blocking_clients:
+                        blocking_clients[stream_key] = []
+                    blocking_clients[stream_key].append((conn, stream_keys, stream_ids, timeout_end))
+
+    else:
+        conn.sendall(b"-ERR unknown command\r\n")
+
+
+def client_thread(conn):
+    buffer = b""
+    while True:
+        try:
+            data = conn.recv(4096)
+            if not data:
+                break
+            buffer += data
+            while buffer:
+                command_parts, buffer = parse_resp(buffer)
+                if not command_parts:
+                    break
+                handle_command(conn, command_parts)
+        except ConnectionResetError:
+            break
+        except Exception:
+            break
+    conn.close()
+
+
+def main():
+    # Start cleanup thread for expired blocking clients
+    cleanup_thread = threading.Thread(target=cleanup_expired_blocking_clients, daemon=True)
+    cleanup_thread.start()
+    
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("localhost", 6379))
+    s.listen()
+    while True:
+        conn, _ = s.accept()
+        threading.Thread(target=client_thread, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main():
+                # Check if stream exists and get the latest ID
+                if (stream_key in store and 
+                    isinstance(store[stream_key], dict) and 
+                    store[stream_key].get('entries')):
+                    stream = store[stream_key]
+                    entries = stream['entries']
+                    # Get the maximum (latest) ID in the stream
+                    latest_id = max(entries.keys(), key=lambda x: (int(x.split('-')[0]), int(x.split('-')[1])))
+                    actual_start_id = latest_id
+                else:
+                    # Stream doesn't exist, use 0-0 so any new entry will be greater
+                    actual_start_id = "0-0"
+            else:
+                actual_start_id = start_id
+            
+            processed_stream_ids.append(actual_start_id)
             
             # Check if stream exists
             if (stream_key not in store or 
@@ -642,7 +774,7 @@ def handle_command(conn, command_parts):
             # Find entries after the specified start_id
             stream_entries = []
             for entry_id in entries:
-                if compare_stream_ids(entry_id, start_id) > 0:
+                if compare_stream_ids(entry_id, actual_start_id) > 0:
                     # Format entry data as [field1, value1, field2, value2, ...]
                     entry_data = entries[entry_id]
                     field_value_list = []

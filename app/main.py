@@ -359,6 +359,33 @@ def handle_command(conn, command_parts):
         else:
             conn.sendall(b"$-1\r\n")
 
+    # INCR
+    elif cmd == "INCR":
+        key = command_parts[1]
+        
+        # Check if key exists and is expired
+        if key in expiry and time.time() > expiry[key]:
+            del store[key]
+            del expiry[key]
+        
+        # For this stage, we only handle the case where key exists and has a numerical value
+        if key in store and isinstance(store[key], str):
+            try:
+                # Try to convert the value to an integer
+                current_value = int(store[key])
+                # Increment by 1
+                new_value = current_value + 1
+                # Store the new value as a string
+                store[key] = str(new_value)
+                # Return the new value as an integer
+                conn.sendall(encode_resp(new_value))
+            except ValueError:
+                # Value is not a valid integer - this will be handled in later stages
+                conn.sendall(b"-ERR value is not an integer or out of range\r\n")
+        else:
+            # Key doesn't exist - this will be handled in later stages
+            conn.sendall(b"-ERR no such key\r\n")
+
     # RPUSH
     elif cmd == "RPUSH":
         key = command_parts[1]

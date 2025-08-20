@@ -350,6 +350,15 @@ def handle_command(conn, command_parts):
             client_transactions[conn] = []
             conn.sendall(b"+OK\r\n")
 
+    # EXEC
+    elif cmd == "EXEC":
+        # Check if client is in transaction mode
+        if conn not in client_transactions:
+            conn.sendall(b"-ERR EXEC without MULTI\r\n")
+        else:
+            # This will be implemented in the next stage
+            conn.sendall(b"-ERR EXEC implementation pending\r\n")
+
     # SET
     elif cmd == "SET":
         if conn in client_transactions:

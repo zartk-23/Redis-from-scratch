@@ -335,14 +335,24 @@ def execute_single_command(command_parts):
 
     # SET
     if cmd == "SET":
+        if len(command_parts) < 3:
+            raise ValueError("ERR wrong number of arguments for 'set' command")
         key, value = command_parts[1], command_parts[2]
         store[key] = value
         if len(command_parts) > 3 and command_parts[3].upper() == "PX":
-            expiry[key] = time.time() + int(command_parts[4]) / 1000.0
+            if len(command_parts) < 5:
+                raise ValueError("ERR syntax error")
+            try:
+                expiry_ms = int(command_parts[4])
+                expiry[key] = time.time() + expiry_ms / 1000.0
+            except ValueError:
+                raise ValueError("ERR value is not an integer or out of range")
         return "OK"
 
     # GET
     elif cmd == "GET":
+        if len(command_parts) < 2:
+            raise ValueError("ERR wrong number of arguments for 'get' command")
         key = command_parts[1]
         if key in expiry and time.time() > expiry[key]:
             del store[key]
@@ -355,6 +365,8 @@ def execute_single_command(command_parts):
 
     # INCR
     elif cmd == "INCR":
+        if len(command_parts) < 2:
+            raise ValueError("ERR wrong number of arguments for 'incr' command")
         key = command_parts[1]
         
         # Check if key exists and is expired
@@ -388,7 +400,7 @@ def execute_single_command(command_parts):
 
     # Add other commands as needed
     else:
-        raise ValueError("ERR unknown command")
+        raise ValueError(f"ERR unknown command '{cmd.lower()}'")
 
 
 def handle_command(conn, command_parts):

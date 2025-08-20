@@ -37,6 +37,43 @@ def generate_stream_id(stream_key, provided_id=None):
         return f"{last_timestamp}-{last_seq + 1}"
 
 
+def validate_stream_id(stream_key, entry_id):
+    """Validate that the entry ID is greater than the last entry ID."""
+    try:
+        # Parse the provided ID
+        timestamp_str, seq_str = entry_id.split('-')
+        timestamp = int(timestamp_str)
+        sequence = int(seq_str)
+    except (ValueError, IndexError):
+        return False, "Invalid ID format"
+    
+    # Check if ID is greater than 0-0 (minimum valid ID)
+    if timestamp == 0 and sequence == 0:
+        return False, "The ID specified in XADD must be greater than 0-0"
+    
+    # If stream doesn't exist or is empty, any ID > 0-0 is valid
+    if (stream_key not in store or 
+        not isinstance(store[stream_key], dict) or 
+        not store[stream_key].get('entries')):
+        return True, None
+    
+    # Get the last entry ID
+    stream = store[stream_key]
+    last_id = list(stream['entries'].keys())[-1]
+    last_timestamp, last_sequence = map(int, last_id.split('-'))
+    
+    # Validate that new ID is greater than last ID
+    if timestamp > last_timestamp:
+        return True, None
+    elif timestamp == last_timestamp:
+        if sequence > last_sequence:
+            return True, None
+        else:
+            return False, f"The ID specified in XADD is equal or smaller than the target stream top item"
+    else:
+        return False, f"The ID specified in XADD is equal or smaller than the target stream top item"
+
+
 def parse_resp(buffer):
     """Parse RESP messages."""
     if not buffer:
@@ -257,12 +294,16 @@ def handle_command(conn, command_parts):
         if key not in store or not isinstance(store[key], dict):
             store[key] = {'entries': {}}
         
-        # Generate ID if needed
+        # Handle ID generation and validation
         if entry_id == "*":
+            # Auto-generate ID (will be implemented in later stages)
             entry_id = generate_stream_id(key)
         else:
-            # Validate and potentially adjust the provided ID
-            entry_id = generate_stream_id(key, entry_id)
+            # Explicit ID - validate it
+            is_valid, error_msg = validate_stream_id(key, entry_id)
+            if not is_valid:
+                conn.sendall(f"-ERR {error_msg}\r\n".encode())
+                return
         
         # Build entry data
         entry_data = {}

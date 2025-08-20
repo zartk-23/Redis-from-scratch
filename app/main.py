@@ -326,6 +326,71 @@ def encode_resp(data):
     return b"+OK\r\n"
 
 
+def execute_single_command(command_parts):
+    """Execute a single command and return the response as a Python object."""
+    if not command_parts:
+        return None
+
+    cmd = command_parts[0].upper()
+
+    # SET
+    if cmd == "SET":
+        key, value = command_parts[1], command_parts[2]
+        store[key] = value
+        if len(command_parts) > 3 and command_parts[3].upper() == "PX":
+            expiry[key] = time.time() + int(command_parts[4]) / 1000.0
+        return "OK"
+
+    # GET
+    elif cmd == "GET":
+        key = command_parts[1]
+        if key in expiry and time.time() > expiry[key]:
+            del store[key]
+            del expiry[key]
+            return None
+        elif key in store and isinstance(store[key], str):
+            return store[key]
+        else:
+            return None
+
+    # INCR
+    elif cmd == "INCR":
+        key = command_parts[1]
+        
+        # Check if key exists and is expired
+        if key in expiry and time.time() > expiry[key]:
+            del store[key]
+            del expiry[key]
+        
+        if key in store:
+            # Key exists - check if it's a string type
+            if isinstance(store[key], str):
+                try:
+                    # Try to convert the value to an integer
+                    current_value = int(store[key])
+                    # Increment by 1
+                    new_value = current_value + 1
+                    # Store the new value as a string
+                    store[key] = str(new_value)
+                    # Return the new value as an integer
+                    return new_value
+                except ValueError:
+                    # Value is not a valid integer
+                    raise ValueError("ERR value is not an integer or out of range")
+            else:
+                # Key exists but is not a string (could be list, stream, etc.)
+                raise ValueError("ERR WRONGTYPE Operation against a key holding the wrong kind of value")
+        else:
+            # Key doesn't exist - treat as if value was 0, then increment to 1
+            new_value = 1
+            store[key] = str(new_value)
+            return new_value
+
+    # Add other commands as needed
+    else:
+        raise ValueError("ERR unknown command")
+
+
 def handle_command(conn, command_parts):
     if not command_parts:
         return
@@ -362,11 +427,22 @@ def handle_command(conn, command_parts):
             # Execute all queued commands and collect responses
             responses = []
             for command in queued_commands:
-                # For now, this will be implemented in later stages
-                # Empty transaction case: no commands queued
-                pass
+                try:
+                    # Execute the command and get the response
+                    response = execute_single_command(command)
+                    responses.append(response)
+                except ValueError as e:
+                    # Handle errors by adding error string to responses
+                    error_msg = str(e)
+                    if error_msg.startswith("ERR "):
+                        responses.append(error_msg)
+                    else:
+                        responses.append("ERR " + error_msg)
+                except Exception:
+                    # Handle unexpected errors
+                    responses.append("ERR server error")
             
-            # Send the array of responses (empty array for empty transaction)
+            # Send the array of responses
             conn.sendall(encode_resp(responses))
             
             # End the transaction by removing client from transaction state

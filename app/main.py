@@ -448,6 +448,17 @@ def handle_command(conn, command_parts):
             # End the transaction by removing client from transaction state
             del client_transactions[conn]
 
+    # DISCARD
+    elif cmd == "DISCARD":
+        # Check if client is in transaction mode
+        if conn not in client_transactions:
+            conn.sendall(b"-ERR DISCARD without MULTI\r\n")
+        else:
+            # Discard the transaction by removing client from transaction state
+            del client_transactions[conn]
+            # Return OK to indicate successful discard
+            conn.sendall(b"+OK\r\n")
+
     # SET
     elif cmd == "SET":
         if conn in client_transactions:

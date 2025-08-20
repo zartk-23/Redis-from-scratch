@@ -243,7 +243,8 @@ def cleanup_expired_blocking_clients():
             for stream_key in list(blocking_clients.keys()):
                 for client_info in blocking_clients[stream_key][:]:  # Copy to avoid modification during iteration
                     conn, stream_keys, stream_ids, timeout_end = client_info
-                    if current_time >= timeout_end:
+                    # Only timeout clients with finite timeout (not infinite)
+                    if timeout_end != float('inf') and current_time >= timeout_end:
                         try:
                             # Send null response for timeout
                             conn.sendall(b"$-1\r\n")

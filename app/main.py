@@ -107,7 +107,44 @@ def validate_stream_id(stream_key, entry_id):
         return False, "Invalid ID format"
 
 
-def validate_final_id(stream_key, entry_id):
+def compare_stream_ids(id1, id2):
+    """Compare two stream IDs. Returns -1 if id1 < id2, 0 if equal, 1 if id1 > id2."""
+    timestamp1, seq1 = map(int, id1.split('-'))
+    timestamp2, seq2 = map(int, id2.split('-'))
+    
+    if timestamp1 < timestamp2:
+        return -1
+    elif timestamp1 > timestamp2:
+        return 1
+    else:
+        # Same timestamp, compare sequence
+        if seq1 < seq2:
+            return -1
+        elif seq1 > seq2:
+            return 1
+        else:
+            return 0
+
+
+def normalize_range_id(range_id, is_start=True):
+    """Normalize range IDs for XRANGE command."""
+    if range_id == "-":
+        # Minimum possible ID
+        return "0-0"
+    elif range_id == "+":
+        # Maximum possible ID (we'll handle this specially)
+        return "+"
+    elif '-' not in range_id:
+        # Just timestamp provided, add appropriate sequence
+        if is_start:
+            return f"{range_id}-0"
+        else:
+            # For end range, we want to include all sequences for this timestamp
+            # We'll use a very large sequence number
+            return f"{range_id}-18446744073709551615"  # Max uint64
+    else:
+        # Full ID provided
+        return range_id
     """Validate that the final entry ID is greater than the last entry ID."""
     try:
         timestamp_str, seq_str = entry_id.split('-')
@@ -399,6 +436,57 @@ def handle_command(conn, command_parts):
         
         # Return the generated/used ID
         conn.sendall(encode_resp(entry_id))
+
+    # XRANGE
+    elif cmd == "XRANGE":
+        if len(command_parts) < 4:
+            conn.sendall(b"-ERR wrong number of arguments\r\n")
+            return
+            
+        key = command_parts[1]
+        start_id = command_parts[2]
+        end_id = command_parts[3]
+        
+        # Check if stream exists
+        if (key not in store or 
+            not isinstance(store[key], dict) or 
+            not store[key].get('entries')):
+            # Return empty array for non-existent stream
+            conn.sendall(encode_resp([]))
+            return
+        
+        stream = store[key]
+        entries = stream['entries']
+        
+        # Normalize range IDs
+        normalized_start = normalize_range_id(start_id, is_start=True)
+        normalized_end = normalize_range_id(end_id, is_start=False)
+        
+        # Filter entries within range
+        result = []
+        for entry_id in entries:
+            # Check if entry_id is within range
+            if normalized_end == "+":
+                # End is maximum, only check start
+                if compare_stream_ids(entry_id, normalized_start) >= 0:
+                    # Format entry data as [field1, value1, field2, value2, ...]
+                    entry_data = entries[entry_id]
+                    field_value_list = []
+                    for field, value in entry_data.items():
+                        field_value_list.extend([field, value])
+                    result.append([entry_id, field_value_list])
+            else:
+                # Check both start and end bounds
+                if (compare_stream_ids(entry_id, normalized_start) >= 0 and 
+                    compare_stream_ids(entry_id, normalized_end) <= 0):
+                    # Format entry data as [field1, value1, field2, value2, ...]
+                    entry_data = entries[entry_id]
+                    field_value_list = []
+                    for field, value in entry_data.items():
+                        field_value_list.extend([field, value])
+                    result.append([entry_id, field_value_list])
+        
+        conn.sendall(encode_resp(result))
 
     else:
         conn.sendall(b"-ERR unknown command\r\n")

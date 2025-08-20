@@ -145,6 +145,42 @@ def normalize_range_id(range_id, is_start=True):
     else:
         # Full ID provided
         return range_id
+
+
+def validate_final_id(stream_key, entry_id):
+    """Validate that the final entry ID is greater than the last entry ID."""
+    try:
+        timestamp_str, seq_str = entry_id.split('-')
+        timestamp = int(timestamp_str)
+        sequence = int(seq_str)
+    except (ValueError, IndexError):
+        return False
+    
+    # Check if ID is greater than 0-0 (minimum valid ID)
+    if timestamp == 0 and sequence == 0:
+        return False
+    
+    # If stream doesn't exist or is empty, any ID > 0-0 is valid
+    if (stream_key not in store or 
+        not isinstance(store[stream_key], dict) or 
+        not store[stream_key].get('entries')):
+        return True
+    
+    # Get the last entry ID
+    stream = store[stream_key]
+    last_id = list(stream['entries'].keys())[-1]
+    last_timestamp, last_sequence = map(int, last_id.split('-'))
+    
+    # Validate that new ID is greater than last ID
+    if timestamp > last_timestamp:
+        return True
+    elif timestamp == last_timestamp:
+        if sequence > last_sequence:
+            return True
+        else:
+            return False
+    else:
+        return False
     """Validate that the final entry ID is greater than the last entry ID."""
     try:
         timestamp_str, seq_str = entry_id.split('-')

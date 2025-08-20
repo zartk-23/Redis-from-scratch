@@ -2,9 +2,39 @@ import socket
 import threading
 import time
 
-store = {}  # key -> (value, expiry_timestamp or list)
+store = {}  # key -> (value, expiry_timestamp, list, or stream)
 expiry = {}  # key -> expiry timestamp
 blocking_clients = {}  # key -> [(conn, timeout_end_time)]
+
+
+def generate_stream_id(stream_key, provided_id=None):
+    """Generate a unique stream ID."""
+    current_time_ms = int(time.time() * 1000)
+    
+    if provided_id and provided_id != "*":
+        # Use provided ID (validate format later if needed)
+        return provided_id
+    
+    # Auto-generate ID: timestamp-sequence
+    if stream_key not in store or not isinstance(store[stream_key], dict):
+        # First entry in stream
+        return f"{current_time_ms}-0"
+    
+    stream = store[stream_key]
+    if not stream.get('entries'):
+        return f"{current_time_ms}-0"
+    
+    # Get the last ID to ensure uniqueness
+    last_id = list(stream['entries'].keys())[-1]
+    last_timestamp, last_seq = map(int, last_id.split('-'))
+    
+    if current_time_ms > last_timestamp:
+        return f"{current_time_ms}-0"
+    elif current_time_ms == last_timestamp:
+        return f"{current_time_ms}-{last_seq + 1}"
+    else:
+        # Current time is behind last timestamp, increment sequence
+        return f"{last_timestamp}-{last_seq + 1}"
 
 
 def parse_resp(buffer):
@@ -202,9 +232,50 @@ def handle_command(conn, command_parts):
             conn.sendall(encode_resp("string"))
         elif isinstance(store[key], list):
             conn.sendall(encode_resp("list"))
+        elif isinstance(store[key], dict) and 'entries' in store[key]:
+            conn.sendall(encode_resp("stream"))
         else:
-            # For any other type (though we only support string and list currently)
+            # For any other type
             conn.sendall(encode_resp("none"))
+
+    # XADD
+    elif cmd == "XADD":
+        if len(command_parts) < 4:
+            conn.sendall(b"-ERR wrong number of arguments\r\n")
+            return
+            
+        key = command_parts[1]
+        entry_id = command_parts[2]
+        
+        # Parse field-value pairs (must be even number of arguments after ID)
+        field_value_pairs = command_parts[3:]
+        if len(field_value_pairs) % 2 != 0:
+            conn.sendall(b"-ERR wrong number of arguments\r\n")
+            return
+        
+        # Create stream if it doesn't exist
+        if key not in store or not isinstance(store[key], dict):
+            store[key] = {'entries': {}}
+        
+        # Generate ID if needed
+        if entry_id == "*":
+            entry_id = generate_stream_id(key)
+        else:
+            # Validate and potentially adjust the provided ID
+            entry_id = generate_stream_id(key, entry_id)
+        
+        # Build entry data
+        entry_data = {}
+        for i in range(0, len(field_value_pairs), 2):
+            field = field_value_pairs[i]
+            value = field_value_pairs[i + 1]
+            entry_data[field] = value
+        
+        # Add entry to stream
+        store[key]['entries'][entry_id] = entry_data
+        
+        # Return the generated/used ID
+        conn.sendall(encode_resp(entry_id))
 
     else:
         conn.sendall(b"-ERR unknown command\r\n")

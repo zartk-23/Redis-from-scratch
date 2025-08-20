@@ -6,6 +6,7 @@ store = {}  # key -> (value, expiry_timestamp, list, or stream)
 expiry = {}  # key -> expiry timestamp
 blocking_clients = {}  # key -> [(conn, timeout_end_time)]
 blocking_clients_lock = threading.Lock()  # Lock for thread-safe access to blocking_clients
+client_transactions = {}  # conn -> list of queued commands
 
 
 def generate_stream_id(stream_key, provided_id=None):
@@ -339,53 +340,86 @@ def handle_command(conn, command_parts):
     elif cmd == "ECHO" and len(command_parts) > 1:
         conn.sendall(encode_resp(command_parts[1]))
 
+    # MULTI
+    elif cmd == "MULTI":
+        # Check if client is already in transaction
+        if conn in client_transactions:
+            conn.sendall(b"-ERR MULTI calls can not be nested\r\n")
+        else:
+            # Start a new transaction for this client
+            client_transactions[conn] = []
+            conn.sendall(b"+OK\r\n")
+
     # SET
     elif cmd == "SET":
-        key, value = command_parts[1], command_parts[2]
-        store[key] = value
-        if len(command_parts) > 3 and command_parts[3].upper() == "PX":
-            expiry[key] = time.time() + int(command_parts[4]) / 1000.0
-        conn.sendall(b"+OK\r\n")
+        if conn in client_transactions:
+            # Queue the command in transaction mode
+            client_transactions[conn].append(command_parts)
+            conn.sendall(b"+QUEUED\r\n")
+        else:
+            # Execute immediately in normal mode
+            key, value = command_parts[1], command_parts[2]
+            store[key] = value
+            if len(command_parts) > 3 and command_parts[3].upper() == "PX":
+                expiry[key] = time.time() + int(command_parts[4]) / 1000.0
+            conn.sendall(b"+OK\r\n")
 
     # GET
     elif cmd == "GET":
-        key = command_parts[1]
-        if key in expiry and time.time() > expiry[key]:
-            del store[key]
-            del expiry[key]
-            conn.sendall(b"$-1\r\n")
-        elif key in store and isinstance(store[key], str):
-            conn.sendall(encode_resp(store[key]))
+        if conn in client_transactions:
+            # Queue the command in transaction mode
+            client_transactions[conn].append(command_parts)
+            conn.sendall(b"+QUEUED\r\n")
         else:
-            conn.sendall(b"$-1\r\n")
+            # Execute immediately in normal mode
+            key = command_parts[1]
+            if key in expiry and time.time() > expiry[key]:
+                del store[key]
+                del expiry[key]
+                conn.sendall(b"$-1\r\n")
+            elif key in store and isinstance(store[key], str):
+                conn.sendall(encode_resp(store[key]))
+            else:
+                conn.sendall(b"$-1\r\n")
 
     # INCR
     elif cmd == "INCR":
-        key = command_parts[1]
-        
-        # Check if key exists and is expired
-        if key in expiry and time.time() > expiry[key]:
-            del store[key]
-            del expiry[key]
-        
-        if key in store and isinstance(store[key], str):
-            try:
-                # Try to convert the value to an integer
-                current_value = int(store[key])
-                # Increment by 1
-                new_value = current_value + 1
-                # Store the new value as a string
-                store[key] = str(new_value)
-                # Return the new value as an integer
-                conn.sendall(encode_resp(new_value))
-            except ValueError:
-                # Value is not a valid integer - this will be handled in later stages
-                conn.sendall(b"-ERR value is not an integer or out of range\r\n")
+        if conn in client_transactions:
+            # Queue the command in transaction mode
+            client_transactions[conn].append(command_parts)
+            conn.sendall(b"+QUEUED\r\n")
         else:
-            # Key doesn't exist - treat as if value was 0, then increment to 1
-            new_value = 1
-            store[key] = str(new_value)
-            conn.sendall(encode_resp(new_value))
+            # Execute immediately in normal mode
+            key = command_parts[1]
+            
+            # Check if key exists and is expired
+            if key in expiry and time.time() > expiry[key]:
+                del store[key]
+                del expiry[key]
+            
+            if key in store:
+                # Key exists - check if it's a string type
+                if isinstance(store[key], str):
+                    try:
+                        # Try to convert the value to an integer
+                        current_value = int(store[key])
+                        # Increment by 1
+                        new_value = current_value + 1
+                        # Store the new value as a string
+                        store[key] = str(new_value)
+                        # Return the new value as an integer
+                        conn.sendall(encode_resp(new_value))
+                    except ValueError:
+                        # Value is not a valid integer
+                        conn.sendall(b"-ERR value is not an integer or out of range\r\n")
+                else:
+                    # Key exists but is not a string (could be list, stream, etc.)
+                    conn.sendall(b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+            else:
+                # Key doesn't exist - treat as if value was 0, then increment to 1
+                new_value = 1
+                store[key] = str(new_value)
+                conn.sendall(encode_resp(new_value))
 
     # RPUSH
     elif cmd == "RPUSH":
@@ -739,6 +773,11 @@ def client_thread(conn):
             break
         except Exception:
             break
+    
+    # Clean up client transaction when connection closes
+    if conn in client_transactions:
+        del client_transactions[conn]
+    
     conn.close()
 
 

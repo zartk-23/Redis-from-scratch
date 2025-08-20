@@ -37,25 +37,82 @@ def generate_stream_id(stream_key, provided_id=None):
         return f"{last_timestamp}-{last_seq + 1}"
 
 
+def generate_sequence_number(stream_key, timestamp):
+    """Generate sequence number for a given timestamp."""
+    # Special case: if timestamp is 0, start with sequence 1
+    if timestamp == 0:
+        if (stream_key not in store or 
+            not isinstance(store[stream_key], dict) or 
+            not store[stream_key].get('entries')):
+            return 1
+        
+        # Find the highest sequence number for timestamp 0
+        stream = store[stream_key]
+        max_seq = 0
+        for entry_id in stream['entries']:
+            entry_timestamp, entry_seq = map(int, entry_id.split('-'))
+            if entry_timestamp == 0 and entry_seq > max_seq:
+                max_seq = entry_seq
+        return max_seq + 1
+    
+    # For non-zero timestamps, start with sequence 0
+    if (stream_key not in store or 
+        not isinstance(store[stream_key], dict) or 
+        not store[stream_key].get('entries')):
+        return 0
+    
+    # Find the highest sequence number for this timestamp
+    stream = store[stream_key]
+    max_seq = -1  # Start with -1 so first entry gets sequence 0
+    for entry_id in stream['entries']:
+        entry_timestamp, entry_seq = map(int, entry_id.split('-'))
+        if entry_timestamp == timestamp and entry_seq > max_seq:
+            max_seq = entry_seq
+    
+    return max_seq + 1
+
+
 def validate_stream_id(stream_key, entry_id):
     """Validate that the entry ID is greater than the last entry ID."""
     try:
-        # Parse the provided ID
+        # Handle timestamp-* format
+        if entry_id.endswith('-*'):
+            timestamp_str = entry_id[:-2]  # Remove '-*'
+            timestamp = int(timestamp_str)
+            # Generate the sequence number
+            sequence = generate_sequence_number(stream_key, timestamp)
+            final_id = f"{timestamp}-{sequence}"
+            
+            # Validate the final ID
+            return validate_final_id(stream_key, final_id), final_id
+        else:
+            # Parse the provided explicit ID
+            timestamp_str, seq_str = entry_id.split('-')
+            timestamp = int(timestamp_str)
+            sequence = int(seq_str)
+            return validate_final_id(stream_key, entry_id), entry_id
+    except (ValueError, IndexError):
+        return False, "Invalid ID format"
+
+
+def validate_final_id(stream_key, entry_id):
+    """Validate that the final entry ID is greater than the last entry ID."""
+    try:
         timestamp_str, seq_str = entry_id.split('-')
         timestamp = int(timestamp_str)
         sequence = int(seq_str)
     except (ValueError, IndexError):
-        return False, "Invalid ID format"
+        return False
     
     # Check if ID is greater than 0-0 (minimum valid ID)
     if timestamp == 0 and sequence == 0:
-        return False, "The ID specified in XADD must be greater than 0-0"
+        return False
     
     # If stream doesn't exist or is empty, any ID > 0-0 is valid
     if (stream_key not in store or 
         not isinstance(store[stream_key], dict) or 
         not store[stream_key].get('entries')):
-        return True, None
+        return True
     
     # Get the last entry ID
     stream = store[stream_key]
@@ -64,14 +121,14 @@ def validate_stream_id(stream_key, entry_id):
     
     # Validate that new ID is greater than last ID
     if timestamp > last_timestamp:
-        return True, None
+        return True
     elif timestamp == last_timestamp:
         if sequence > last_sequence:
-            return True, None
+            return True
         else:
-            return False, f"The ID specified in XADD is equal or smaller than the target stream top item"
+            return False
     else:
-        return False, f"The ID specified in XADD is equal or smaller than the target stream top item"
+        return False
 
 
 def parse_resp(buffer):
@@ -294,15 +351,28 @@ def handle_command(conn, command_parts):
         if key not in store or not isinstance(store[key], dict):
             store[key] = {'entries': {}}
         
-        # Handle ID generation and validation
+        # Handle different ID formats
         if entry_id == "*":
-            # Auto-generate ID (will be implemented in later stages)
+            # Auto-generate full ID (will be implemented in next stage)
             entry_id = generate_stream_id(key)
-        else:
-            # Explicit ID - validate it
-            is_valid, error_msg = validate_stream_id(key, entry_id)
+        elif entry_id.endswith('-*'):
+            # Auto-generate sequence number
+            is_valid, final_id = validate_stream_id(key, entry_id)
             if not is_valid:
-                conn.sendall(f"-ERR {error_msg}\r\n".encode())
+                if final_id.split('-')[0] == '0' and final_id.split('-')[1] == '0':
+                    conn.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
+                else:
+                    conn.sendall(b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+                return
+            entry_id = final_id
+        else:
+            # Explicit ID - validate it  
+            is_valid, final_id = validate_stream_id(key, entry_id)
+            if not is_valid:
+                if entry_id == '0-0':
+                    conn.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
+                else:
+                    conn.sendall(b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
                 return
         
         # Build entry data
